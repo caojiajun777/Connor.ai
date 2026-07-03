@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from app.agents import AgentRunRequest
+from app.clusterer.materialization import ClusterOutputMaterializer
+from app.clusterer.tasks import ClusterTaskFactory
 from app.domain import AgentRole, RunPhase, RunState, RunStatus, TraceEventType, TraceStatus
 from app.domain.base import utc_now
 from app.harness.context import HarnessContext
@@ -34,6 +36,7 @@ class CollectLoopHarness:
         self.context = context
         self.gate_service = gate_service or QualityGateService(context.config)
         self.materializer = ScoutOutputMaterializer(context)
+        self.cluster_materializer = ClusterOutputMaterializer(context)
 
     def run(
         self,
@@ -140,12 +143,7 @@ class CollectLoopHarness:
                     phase=phase,
                     agent_role=task.agent_role,
                     task=task.task,
-                    context={
-                        **task.context,
-                        "run_id": run.id,
-                        "report_date": run.report_date.isoformat(),
-                        "collect_round": run.loop_counters.collect_rounds,
-                    },
+                    context=self._build_task_context(run, phase, task.context),
                 )
             )
             tool_call_count += len(result.tool_results)
@@ -156,6 +154,16 @@ class CollectLoopHarness:
                     agent_role=task.agent_role,
                     result=result,
                     bootstrap_cluster_and_evaluation=self._should_bootstrap_single_agent(
+                        tasks_by_phase
+                    ),
+                )
+            if phase == RunPhase.CLUSTERING and self.context.config.materialize_clusterer_outputs:
+                self.cluster_materializer.materialize(
+                    run=run,
+                    phase=phase,
+                    agent_role=task.agent_role,
+                    result=result,
+                    bootstrap_evaluations=self._should_bootstrap_clusterer_evaluations(
                         tasks_by_phase
                     ),
                 )
@@ -184,6 +192,35 @@ class CollectLoopHarness:
             and not tasks_by_phase.get(RunPhase.CLUSTERING)
             and not tasks_by_phase.get(RunPhase.EVALUATING)
         )
+
+    def _should_bootstrap_clusterer_evaluations(
+        self,
+        tasks_by_phase: Mapping[RunPhase, list[AgentTask]],
+    ) -> bool:
+        return (
+            self.context.config.bootstrap_single_agent_evaluations
+            and not tasks_by_phase.get(RunPhase.EVALUATING)
+        )
+
+    def _build_task_context(
+        self,
+        run: RunState,
+        phase: RunPhase,
+        task_context: dict,
+    ) -> dict:
+        context = {
+            **task_context,
+            "run_id": run.id,
+            "report_date": run.report_date.isoformat(),
+            "collect_round": run.loop_counters.collect_rounds,
+        }
+        if phase == RunPhase.CLUSTERING:
+            full_state = self.context.runs.get_full_state(run.id)
+            context["candidate_context"] = ClusterTaskFactory.candidate_context(
+                candidates=full_state.candidates,
+                evidence=full_state.evidence,
+            )
+        return context
 
     def _record_gate_decision(self, run: RunState, decision: CollectGateDecision) -> None:
         self.context.trace_service.record_event(

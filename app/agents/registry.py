@@ -3,6 +3,7 @@
 from app.agents.config import AgentExecutionConfig, AgentRoleConfig
 from app.agents.outputs import (
     AgentStructuredOutput,
+    ClustererOutput,
     EditorOutput,
     EvaluatorOutput,
     ReviewerOutput,
@@ -63,6 +64,8 @@ def create_default_agent_role_registry(tool_registry: ToolRegistry) -> AgentRole
         output_model: type[AgentStructuredOutput]
         if role in SCOUT_ROLES:
             output_model = ScoutOutput
+        elif role == AgentRole.CLUSTERER:
+            output_model = ClustererOutput
         elif role in EVALUATOR_ROLES:
             output_model = EvaluatorOutput
         elif role == AgentRole.WRITER:

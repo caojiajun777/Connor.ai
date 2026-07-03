@@ -565,3 +565,68 @@ Open follow-ups:
 - Start Phase 9: Clusterer.
 - Replace bootstrap cluster creation with production clustering.
 - Add canonical claim generation, dedupe keys, conflict preservation, and early-signal-to-confirmation linking.
+
+### Phase 9 Complete: Clusterer
+
+What we did:
+
+- Added Clusterer-specific structured outputs: `ClusterTimelineDraft`, `ClusterDraft`, and `ClustererOutput`.
+- Bound `AgentRole.CLUSTERER` to `ClustererOutput` in the agent registry.
+- Added `app/clusterer` with `ClusterOutputMaterializer` and `ClusterTaskFactory`.
+- Added candidate context construction so the collect loop can pass compact candidate/evidence summaries into Clusterer tasks.
+- Connected Clusterer materialization into `CollectLoopHarness`.
+- Added cluster draft validation against persisted candidates and run ownership.
+- Added evidence lineage expansion from candidate evidence ids.
+- Added deterministic cluster id generation and dedupe-key fallback.
+- Added dedupe-key merge behavior for existing clusters.
+- Added early-signal to official-confirmation metadata links.
+- Added conflict metadata preservation.
+- Added a marked temporary `bootstrap_clusterer_evaluation` path when no Evaluator task exists.
+- Avoided clusterer/harness circular imports with lazy imports for harness-only types.
+- Added Clusterer materialization tests and a full AgentScope Scout-to-Clusterer closed-loop test.
+
+Why:
+
+- Phase 8 still relied on Scout-side bootstrap cluster creation when no real Clusterer existed.
+- Connor.ai needs event-level dedupe and canonical claims before the Evaluator group can make meaningful decisions.
+- The Clusterer should be an AgentScope role, but cluster persistence must remain a Connor harness responsibility.
+- Historical logic chains require explicit links between earlier signals and later confirmations.
+
+Files changed:
+
+- `app/agents/__init__.py`
+- `app/agents/outputs.py`
+- `app/agents/registry.py`
+- `app/clusterer/__init__.py`
+- `app/clusterer/materialization.py`
+- `app/clusterer/tasks.py`
+- `app/harness/collect.py`
+- `app/harness/config.py`
+- `tests/agents/test_registry.py`
+- `tests/clusterer/__init__.py`
+- `tests/clusterer/test_materialization.py`
+- `tests/harness/test_clusterer_closed_loop.py`
+- `docs/MASTER_PLAN.md`
+- `docs/PROGRESS.md`
+- `docs/plans/phase-09-clusterer.md`
+- `docs/adr/0011-clusterer-materialization-boundary.md`
+- `docs/DEV_LOG.md`
+
+Checks:
+
+- `python -m pytest tests\clusterer tests\harness\test_clusterer_closed_loop.py tests\agents\test_registry.py -q`: 5 passed.
+- `python -m pytest -q`: 56 passed.
+- `python -m compileall app tests`: passed.
+
+Effect:
+
+- Phase 9 is complete.
+- Scout outputs now become candidates, and Clusterer outputs now become real `EventCluster` records.
+- Clusters preserve canonical claims, candidate lineage, evidence lineage, timeline entries, conflicts, and confirmation links.
+- The collect loop can run through Scout -> Clusterer -> temporary evaluation -> gate without relying on Scout-side cluster bootstrap.
+
+Open follow-ups:
+
+- Start Phase 10: Evaluator Group.
+- Replace `bootstrap_clusterer_evaluation` with Frontier/Event/Market evaluator materialization.
+- Add structured evaluator scoring rules for early signals, confirmed events, and tech-finance clusters.

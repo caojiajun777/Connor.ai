@@ -327,6 +327,11 @@ Acceptance:
 - Conflicting evidence is preserved.
 - Canonical claim is generated.
 - Early signals and later official confirmations can be linked.
+- Clusterer has a role-specific `ClustererOutput` schema.
+- Clusterer outputs are materialized by Connor, not written directly by agents.
+- Dedupe-key merges preserve candidate and evidence lineage.
+- The collect loop passes candidate context into Clusterer tasks.
+- A temporary marked evaluator bridge keeps the loop runnable until Phase 10.
 
 ### Phase 10: Evaluator Group
 

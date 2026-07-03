@@ -1,6 +1,7 @@
 """Agent role registry tests."""
 
 from app.agents import (
+    ClustererOutput,
     EvaluatorOutput,
     ScoutOutput,
     WriterOutput,
@@ -15,13 +16,14 @@ def test_default_agent_role_registry_binds_output_models_and_tools() -> None:
     agent_registry = create_default_agent_role_registry(tool_registry)
 
     social_config = agent_registry.require(AgentRole.SOCIAL_SCOUT)
+    clusterer_config = agent_registry.require(AgentRole.CLUSTERER)
     frontier_config = agent_registry.require(AgentRole.FRONTIER_EVALUATOR)
     writer_config = agent_registry.require(AgentRole.WRITER)
 
     assert social_config.output_model is ScoutOutput
+    assert clusterer_config.output_model is ClustererOutput
     assert frontier_config.output_model is EvaluatorOutput
     assert writer_config.output_model is WriterOutput
     assert "manual_seed" in social_config.allowed_tool_names
     assert "mock_search" in frontier_config.allowed_tool_names
     assert "manual_seed" not in writer_config.allowed_tool_names
-

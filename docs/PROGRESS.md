@@ -4,9 +4,9 @@ Last updated: 2026-07-03
 
 ## Current Status
 
-Project state: Phase 8 complete. Connor.ai now has all five Scout roles wired through AgentScope task execution, role-specific profile constraints, materialization validation, evidence/candidate persistence, bootstrap cluster/evaluation, collect gate, trace, and tests.
+Project state: Phase 9 complete. Connor.ai now has a real AgentScope Clusterer path with structured cluster drafts, Connor-owned cluster materialization, dedupe-key merge, conflict preservation, early-signal to official-confirmation links, trace, and tests.
 
-Next phase: Phase 9, Clusterer.
+Next phase: Phase 10, Evaluator Group.
 
 ## Phase Progress
 
@@ -20,7 +20,7 @@ Next phase: Phase 9, Clusterer.
 | 6 | Loop Harness | Complete | DailyRunHarness, collect loop, writing loop, quality gates, budgets, trace, and artifact snapshots delivered. |
 | 7 | Single-Agent Closed Loop | Complete | One Social Scout path now runs through AgentScope tool call, evidence, candidate materialization, bootstrap cluster/evaluation, and collect gate. |
 | 8 | All Scouts | Complete | Five Scout profiles, task templates, prompt constraints, materialization validation, and all-Scout closed-loop tests delivered. |
-| 9 | Clusterer | Not started | Candidate dedupe and canonical claims. |
+| 9 | Clusterer | Complete | ClustererOutput, ClusterOutputMaterializer, dedupe merge, confirmation links, conflict preservation, and closed-loop tests delivered. |
 | 10 | Evaluator Group | Not started | Frontier, Event, Market evaluators. |
 | 11 | Watchlist + Archive + Intelligence Threads | Not started | Cost-aware memory and logic chains. |
 | 12 | Writing Loop | Not started | Writer, Reviewer, Editor loop. |
@@ -174,17 +174,41 @@ Checks:
 - `python -m pytest -q`: 52 passed.
 - `python -m compileall app tests`: passed.
 
+## Phase 9 Results
+
+Delivered:
+
+- `ClusterTimelineDraft`, `ClusterDraft`, and `ClustererOutput` structured output schemas.
+- Agent registry binding for `AgentRole.CLUSTERER -> ClustererOutput`.
+- `app/clusterer` package with `ClusterOutputMaterializer` and `ClusterTaskFactory`.
+- Candidate context construction for Clusterer tasks.
+- Collect loop integration for the clustering phase.
+- Materialization validation for candidate existence and run ownership.
+- Evidence lineage expansion from candidate evidence ids.
+- Deterministic cluster id generation.
+- Agent-provided and fallback dedupe-key behavior.
+- Dedupe-key merge that preserves candidates, evidence, timeline, entities, tickers, topics, conflict summary, and metadata.
+- Early-signal to official-confirmation link metadata.
+- Temporary marked `bootstrap_clusterer_evaluation` bridge when no Evaluator task is scheduled.
+- Tests for materialization, dedupe merge, missing candidate rejection, agent registry binding, and a Scout-to-Clusterer AgentScope closed loop.
+
+Checks:
+
+- `python -m pytest tests\clusterer tests\harness\test_clusterer_closed_loop.py tests\agents\test_registry.py -q`: 5 passed.
+- `python -m pytest -q`: 56 passed.
+- `python -m compileall app tests`: passed.
+
 ## Immediate Next Step
 
-Phase 9: Clusterer.
+Phase 10: Evaluator Group.
 
 Initial scope:
 
-- Replace bootstrap cluster creation with a real Clusterer path.
-- Group related candidates into canonical event clusters.
-- Preserve conflicting evidence instead of overwriting it.
-- Generate deterministic dedupe keys.
-- Link early signals and later official confirmations when they refer to the same underlying event.
+- Add structured evaluator drafts for Frontier, Event, and Market evaluators.
+- Materialize evaluator outputs into `EvaluationResult`.
+- Replace `bootstrap_clusterer_evaluation`.
+- Preserve early-signal looser standards while enforcing confirmed-event and market-impact rules.
+- Route follow-up, watch, archive, select, and recluster decisions through the collect gate.
 
 ## Definition of Done for Each Phase
 

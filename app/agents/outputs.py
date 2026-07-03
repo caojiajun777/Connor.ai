@@ -68,6 +68,49 @@ class ScoutOutput(AgentStructuredOutput):
         return self
 
 
+class ClusterTimelineDraft(ConnorBaseModel):
+    """Clusterer-proposed timeline entry."""
+
+    summary: NonEmptyStr
+    evidence_ids: list[str] = Field(default_factory=list)
+    candidate_ids: list[str] = Field(default_factory=list)
+
+
+class ClusterDraft(ConnorBaseModel):
+    """Clusterer-proposed event cluster content."""
+
+    category: CandidateCategory
+    title: NonEmptyStr
+    canonical_claim: NonEmptyStr
+    candidate_ids: list[str]
+    evidence_ids: list[str] = Field(default_factory=list)
+    entities: list[str] = Field(default_factory=list)
+    tickers: list[str] = Field(default_factory=list)
+    topics: list[str] = Field(default_factory=list)
+    timeline: list[ClusterTimelineDraft] = Field(default_factory=list)
+    conflict_summary: str | None = None
+    dedupe_key: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_cluster_draft(self) -> "ClusterDraft":
+        if not self.candidate_ids:
+            raise ValueError("cluster drafts require candidate_ids")
+        return self
+
+
+class ClustererOutput(AgentStructuredOutput):
+    """Structured Clusterer output."""
+
+    cluster_drafts: list[ClusterDraft] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_clusterer_output(self) -> "ClustererOutput":
+        if not (self.cluster_ids or self.cluster_drafts):
+            raise ValueError("clusterer output requires cluster_ids or cluster_drafts")
+        return self
+
+
 class EvaluatorOutput(AgentStructuredOutput):
     """Structured Evaluator output."""
 
