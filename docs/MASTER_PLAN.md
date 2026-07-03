@@ -271,9 +271,12 @@ Implement collect and writing state machines with boundaries.
 
 Acceptance:
 
-- Collect failures return to Scout or Clusterer.
-- Writing failures return to Editor.
-- Max rounds, budgets, and timeouts prevent infinite loops.
+- DailyRunHarness can create, run, and resume daily runs.
+- Collect loop can enter writing, follow up, recluster, continue, pause for manual review, or fail.
+- Writing loop can review, revise, reopen collection, finalize, pause for manual review, or fail.
+- Max rounds, budgets, and revision limits prevent infinite loops.
+- Harness gate decisions are persisted as trace events.
+- Gate and final-report snapshots are stored as artifacts.
 
 ### Phase 7: Single-Agent Closed Loop
 

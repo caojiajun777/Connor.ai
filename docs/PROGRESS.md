@@ -4,9 +4,9 @@ Last updated: 2026-07-03
 
 ## Current Status
 
-Project state: Phase 5 complete. Connor.ai now has domain contracts, persistence, tracing/artifacts, tools, and a tested AgentScope-first agent execution path.
+Project state: Phase 6 complete. Connor.ai now has domain contracts, persistence, tracing/artifacts, tools, AgentScope-first execution, and a tested loop harness.
 
-Next phase: Phase 6, Loop Harness.
+Next phase: Phase 7, Single-Agent Closed Loop.
 
 ## Phase Progress
 
@@ -17,7 +17,7 @@ Next phase: Phase 6, Loop Harness.
 | 3 | Tracing and Artifacts | Complete | ArtifactService, TraceService, timeline reconstruction, and service tests delivered. |
 | 4 | Tool Contract and Registry | Complete | ToolSpec, ToolRegistry, ToolExecutor, manual seed/mock tools, evidence normalization, and tool tests delivered. |
 | 5 | AgentScope Integration | Complete | AgentScope is a main dependency; AgentRunner uses AgentScope Agent/Toolkit/FunctionTool directly. |
-| 6 | Loop Harness | Not started | Collect and writing state machines. |
+| 6 | Loop Harness | Complete | DailyRunHarness, collect loop, writing loop, quality gates, budgets, trace, and artifact snapshots delivered. |
 | 7 | Single-Agent Closed Loop | Not started | First end-to-end agent path. |
 | 8 | All Scouts | Not started | Five scout roles. |
 | 9 | Clusterer | Not started | Candidate dedupe and canonical claims. |
@@ -117,16 +117,35 @@ Checks:
 - `python -m compileall app tests`: passed.
 - `python -m pytest -q`: 38 passed.
 
+## Phase 6 Results
+
+Delivered:
+
+- `app/harness` package with config, context, decisions, exceptions, gates, collect loop, writing loop, and daily runner.
+- `DailyRunHarness` for create, run, and resume.
+- `CollectLoopHarness` with bounded collect rounds and gate outcomes for writing, follow-up, recluster, continue, manual review, and failure.
+- `WritingLoopHarness` with bounded writing/review rounds and outcomes for finalize, review draft, revise, reopen collect, manual review, and failure.
+- `QualityGateService` for deterministic collect and writing gate decisions.
+- Harness trace events for run start, phase start/completion, gate decisions, report finalization, and failures.
+- Harness artifact snapshots for collect gate decisions, writing gate decisions, and final report payloads.
+- Tests for gates, collect loop, writing revision loop, and top-level daily run finalization.
+
+Checks:
+
+- `python -m pytest tests\harness -q`: 7 passed.
+- `python -m pytest -q`: 45 passed.
+- `python -m compileall app tests`: passed.
+
 ## Immediate Next Step
 
-Phase 6: Loop Harness.
+Phase 7: Single-Agent Closed Loop.
 
 Initial scope:
 
-- Implement collect and writing state machines.
-- Use AgentRunner, ToolExecutor, TraceService, and repositories under the AgentScope-first execution path.
-- Add loop boundaries, budgets, phase transitions, and quality gates.
-- Keep tests deterministic with AgentScope `ChatModelBase` test doubles before adding real external sources.
+- Build one complete Scout path inside the Phase 6 harness.
+- Use AgentScope `AgentRunner` and a real Connor tool.
+- Persist evidence and candidate output from one agent task.
+- Prove the run can move through collect gate with a single-agent item.
 
 ## Definition of Done for Each Phase
 

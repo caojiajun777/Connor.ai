@@ -388,3 +388,69 @@ Open follow-ups:
 - Start Phase 6: Loop Harness on top of the corrected AgentScope-first `AgentRunner`.
 - Add AgentScope event-stream middleware tracing when the harness starts using streamed events.
 - Add real model provider configuration after loop boundaries and quality gates are stable.
+
+### Phase 6 Complete: Loop Harness
+
+What we did:
+
+- Added the `app/harness` package.
+- Added `HarnessConfig` for loop limits and quality thresholds.
+- Added `HarnessContext` for shared repositories, trace service, artifact service, run updates, phase transitions, failure handling, and snapshot archival.
+- Added `AgentTask`, `CollectGateDecision`, `WritingGateDecision`, and `DailyRunResult`.
+- Added `QualityGateService` for deterministic collect and writing gate decisions.
+- Added `CollectLoopHarness` with bounded collect rounds, AgentScope task dispatch, gate decisions, follow-up, recluster, manual review, and failure paths.
+- Added `WritingLoopHarness` with Writer, Reviewer, Editor, final review, revision budget, reopen collect, manual review, failure, and finalization paths.
+- Added `DailyRunHarness` for creating, running, and resuming daily runs.
+- Added harness trace events for run start, phase start/completion, gate decisions, final report acceptance, and errors.
+- Added artifact snapshots for collect gate decisions, writing gate decisions, and final report payloads.
+- Added Phase 6 tests for quality gates, collect loop, writing loop, and full daily run finalization.
+- Added Phase 6 plan documentation and ADR 0008.
+
+Why:
+
+- AgentScope should control agent execution, while Connor needs deterministic product control around run lifecycle, loop boundaries, quality gates, artifact archival, and trace persistence.
+- A long-running daily intelligence system must be bounded and replayable before adding more sources or more autonomous agent behavior.
+- Gate decisions should be structured and auditable rather than hidden in prompts.
+
+Files changed:
+
+- `app/harness/__init__.py`
+- `app/harness/config.py`
+- `app/harness/context.py`
+- `app/harness/decisions.py`
+- `app/harness/exceptions.py`
+- `app/harness/gates.py`
+- `app/harness/collect.py`
+- `app/harness/writing.py`
+- `app/harness/runner.py`
+- `tests/harness/__init__.py`
+- `tests/harness/helpers.py`
+- `tests/harness/test_quality_gates.py`
+- `tests/harness/test_collect_loop.py`
+- `tests/harness/test_writing_loop.py`
+- `tests/harness/test_daily_run_harness.py`
+- `docs/MASTER_PLAN.md`
+- `docs/PROGRESS.md`
+- `docs/plans/phase-06-loop-harness.md`
+- `docs/adr/0008-loop-harness-control-boundary.md`
+- `docs/DEV_LOG.md`
+
+Checks:
+
+- `python -m pytest tests\harness -q`: 7 passed.
+- `python -m pytest -q`: 45 passed.
+- `python -m compileall app tests`: passed.
+
+Effect:
+
+- Phase 6 is complete.
+- Connor.ai now has a tested loop harness that controls run state, collect loop, writing loop, quality gates, loop budgets, trace, and artifact snapshots.
+- Agent tasks in the harness still route through the AgentScope-first `AgentRunner`.
+- Future phases can add real Scout, Clusterer, Evaluator, Watchlist, Writer, Reviewer, and Editor behavior without rewriting run control.
+
+Open follow-ups:
+
+- Start Phase 7: Single-Agent Closed Loop.
+- Build one real Scout path inside the harness.
+- Convert one AgentScope agent output into persisted evidence and candidate objects.
+- Add richer AgentScope event-stream tracing once streamed execution is used.
