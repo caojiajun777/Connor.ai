@@ -1,0 +1,87 @@
+"""Agent role registry."""
+
+from app.agents.config import AgentExecutionConfig, AgentRoleConfig
+from app.agents.outputs import (
+    AgentStructuredOutput,
+    EditorOutput,
+    EvaluatorOutput,
+    ReviewerOutput,
+    ScoutOutput,
+    WriterOutput,
+)
+from app.agents.prompts import ROLE_PROMPTS
+from app.domain import AgentRole
+from app.tools import ToolRegistry
+
+
+SCOUT_ROLES = {
+    AgentRole.SOCIAL_SCOUT,
+    AgentRole.CODE_MODEL_SCOUT,
+    AgentRole.RESEARCH_SCOUT,
+    AgentRole.OFFICIAL_SCOUT,
+    AgentRole.FINANCE_SCOUT,
+}
+
+EVALUATOR_ROLES = {
+    AgentRole.FRONTIER_EVALUATOR,
+    AgentRole.EVENT_EVALUATOR,
+    AgentRole.MARKET_EVALUATOR,
+}
+
+
+class AgentRoleRegistry:
+    """Stores role-level agent configuration."""
+
+    def __init__(self):
+        self._configs: dict[AgentRole, AgentRoleConfig] = {}
+
+    def register(self, config: AgentRoleConfig) -> AgentRoleConfig:
+        if config.role in self._configs:
+            raise ValueError(f"agent role already registered: {config.role.value}")
+        self._configs[config.role] = config
+        return config
+
+    def require(self, role: AgentRole) -> AgentRoleConfig:
+        config = self._configs.get(role)
+        if config is None:
+            raise ValueError(f"agent role not registered: {role.value}")
+        return config
+
+    def list_configs(self) -> list[AgentRoleConfig]:
+        return list(self._configs.values())
+
+
+def create_default_agent_role_registry(tool_registry: ToolRegistry) -> AgentRoleRegistry:
+    """Create role configs using registered tool permissions."""
+
+    registry = AgentRoleRegistry()
+    for role in AgentRole:
+        if role == AgentRole.SYSTEM:
+            continue
+        output_model: type[AgentStructuredOutput]
+        if role in SCOUT_ROLES:
+            output_model = ScoutOutput
+        elif role in EVALUATOR_ROLES:
+            output_model = EvaluatorOutput
+        elif role == AgentRole.WRITER:
+            output_model = WriterOutput
+        elif role == AgentRole.REVIEWER:
+            output_model = ReviewerOutput
+        elif role == AgentRole.EDITOR:
+            output_model = EditorOutput
+        else:
+            output_model = AgentStructuredOutput
+
+        registry.register(
+            AgentRoleConfig(
+                role=role,
+                display_name=role.value.replace("_", " ").title(),
+                system_prompt=ROLE_PROMPTS[role],
+                allowed_tool_names=[
+                    spec.name for spec in tool_registry.list_for_agent(role)
+                ],
+                output_model=output_model,
+                execution=AgentExecutionConfig(),
+            )
+        )
+    return registry
