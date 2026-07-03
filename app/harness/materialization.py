@@ -28,6 +28,12 @@ from app.domain.base import utc_now
 from app.harness.context import HarnessContext
 from app.harness.exceptions import HarnessError
 from app.repositories import CandidateRepository, EvaluationRepository, EventClusterRepository
+from app.repositories import EvidenceRepository
+from app.scouts.profiles import (
+    ScoutProfileError,
+    ScoutProfileRegistry,
+    create_default_scout_profile_registry,
+)
 
 
 @dataclass
@@ -42,11 +48,18 @@ class MaterializationResult:
 class ScoutOutputMaterializer:
     """Persist Scout candidate drafts and optional single-agent bootstrap objects."""
 
-    def __init__(self, context: HarnessContext):
+    def __init__(
+        self,
+        context: HarnessContext,
+        *,
+        scout_profiles: ScoutProfileRegistry | None = None,
+    ):
         self.context = context
         self.candidates = CandidateRepository(context.session)
         self.clusters = EventClusterRepository(context.session)
         self.evaluations = EvaluationRepository(context.session)
+        self.evidence = EvidenceRepository(context.session)
+        self.scout_profiles = scout_profiles or create_default_scout_profile_registry()
 
     def materialize(
         self,
@@ -125,6 +138,12 @@ class ScoutOutputMaterializer:
         evidence_ids = draft.evidence_ids or available_evidence_ids
         if not evidence_ids and draft.signal_status != SignalStatus.MANUAL_HYPOTHESIS:
             raise HarnessError("Scout candidate draft requires evidence_ids from output or tool results.")
+        evidence_items = [self.evidence.require(evidence_id) for evidence_id in evidence_ids]
+        profile = self.scout_profiles.require(agent_role)
+        try:
+            profile.validate_draft(draft, evidence_items)
+        except ScoutProfileError as exc:
+            raise HarnessError(str(exc)) from exc
 
         candidate_id = self._stable_id(
             "cand",
@@ -151,7 +170,11 @@ class ScoutOutputMaterializer:
             potential_impact=draft.potential_impact,
             followup_questions=draft.followup_questions,
             created_by_agent=agent_role,
-            metadata={**draft.metadata, "materialized_by": "ScoutOutputMaterializer"},
+            metadata={
+                **draft.metadata,
+                "materialized_by": "ScoutOutputMaterializer",
+                "scout_profile": profile.role.value,
+            },
             created_at=utc_now(),
         )
 

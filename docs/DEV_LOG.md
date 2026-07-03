@@ -509,3 +509,59 @@ Open follow-ups:
 - Start Phase 8: All Scouts.
 - Add role-specific candidate draft expectations for Social, Code & Model, Research, Official, and Finance Scouts.
 - Replace bootstrap clustering/evaluation with full Clusterer and Evaluator agents in Phases 9 and 10.
+
+### Phase 8 Complete: All Scouts
+
+What we did:
+
+- Added the `app/scouts` package.
+- Added `ScoutProfile`, `ScoutProfileRegistry`, and `ScoutProfileError`.
+- Added default profiles for Social Scout, Code & Model Scout, Research Scout, Official Scout, and Finance Scout.
+- Added `ScoutTaskFactory` for role-specific `AgentTask` construction.
+- Added Scout profile prompt extensions to the AgentScope role registry.
+- Added materialization-time validation so each Scout's `CandidateDraft` is checked before `CandidateItem` persistence.
+- Added candidate metadata that records the producing Scout profile.
+- Added lazy `ScoutTaskFactory` export in `app/scouts/__init__.py` to avoid a circular import between agent registry and harness task construction.
+- Added profile tests and all-Scout AgentScope closed-loop tests.
+
+Why:
+
+- Phase 7 proved one Scout path, but Connor.ai needs five distinct Scout roles before real source expansion.
+- We wanted role-specific boundaries without creating a custom agent runtime contract.
+- Early signals should stay permissive, while official and finance items need stricter validation.
+- The harness should reject invalid Scout output before it becomes persisted intelligence state.
+
+Files changed:
+
+- `app/scouts/__init__.py`
+- `app/scouts/profiles.py`
+- `app/scouts/tasks.py`
+- `app/agents/registry.py`
+- `app/harness/materialization.py`
+- `tests/scouts/__init__.py`
+- `tests/scouts/test_profiles.py`
+- `tests/harness/test_all_scouts_closed_loop.py`
+- `docs/MASTER_PLAN.md`
+- `docs/PROGRESS.md`
+- `docs/plans/phase-08-all-scouts.md`
+- `docs/adr/0010-scout-profile-boundaries.md`
+- `docs/DEV_LOG.md`
+
+Checks:
+
+- `python -m pytest tests\scouts tests\harness\test_all_scouts_closed_loop.py tests\harness\test_single_agent_closed_loop.py tests\agents\test_registry.py -q`: 8 passed.
+- `python -m pytest -q`: 52 passed.
+- `python -m compileall app tests`: passed.
+
+Effect:
+
+- Phase 8 is complete.
+- All five Scout roles now have explicit role profiles, prompt/task constraints, and materialization validation.
+- All five Scouts can run through AgentScope, call Connor tools, produce candidate drafts, create candidates, create bootstrap clusters/evaluations, and pass the collect gate.
+- Invalid profile output is blocked before persistence.
+
+Open follow-ups:
+
+- Start Phase 9: Clusterer.
+- Replace bootstrap cluster creation with production clustering.
+- Add canonical claim generation, dedupe keys, conflict preservation, and early-signal-to-confirmation linking.

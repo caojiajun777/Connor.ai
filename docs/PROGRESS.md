@@ -4,9 +4,9 @@ Last updated: 2026-07-03
 
 ## Current Status
 
-Project state: Phase 7 complete. Connor.ai now has a tested single-AgentScope-Scout closed loop from tool call to evidence, candidate, provisional cluster/evaluation, collect gate, trace, and persistence.
+Project state: Phase 8 complete. Connor.ai now has all five Scout roles wired through AgentScope task execution, role-specific profile constraints, materialization validation, evidence/candidate persistence, bootstrap cluster/evaluation, collect gate, trace, and tests.
 
-Next phase: Phase 8, All Scouts.
+Next phase: Phase 9, Clusterer.
 
 ## Phase Progress
 
@@ -19,7 +19,7 @@ Next phase: Phase 8, All Scouts.
 | 5 | AgentScope Integration | Complete | AgentScope is a main dependency; AgentRunner uses AgentScope Agent/Toolkit/FunctionTool directly. |
 | 6 | Loop Harness | Complete | DailyRunHarness, collect loop, writing loop, quality gates, budgets, trace, and artifact snapshots delivered. |
 | 7 | Single-Agent Closed Loop | Complete | One Social Scout path now runs through AgentScope tool call, evidence, candidate materialization, bootstrap cluster/evaluation, and collect gate. |
-| 8 | All Scouts | Not started | Five scout roles. |
+| 8 | All Scouts | Complete | Five Scout profiles, task templates, prompt constraints, materialization validation, and all-Scout closed-loop tests delivered. |
 | 9 | Clusterer | Not started | Candidate dedupe and canonical claims. |
 | 10 | Evaluator Group | Not started | Frontier, Event, Market evaluators. |
 | 11 | Watchlist + Archive + Intelligence Threads | Not started | Cost-aware memory and logic chains. |
@@ -136,17 +136,6 @@ Checks:
 - `python -m pytest -q`: 45 passed.
 - `python -m compileall app tests`: passed.
 
-## Immediate Next Step
-
-Phase 8: All Scouts.
-
-Initial scope:
-
-- Expand single-agent materialization to all Scout roles.
-- Add role-specific scout task templates and source/tool boundaries.
-- Ensure Social, Code & Model, Research, Official, and Finance scouts can each produce valid candidate drafts.
-- Keep Clusterer/Evaluator bootstrap clearly marked until Phase 9/10 replace it.
-
 ## Phase 7 Results
 
 Delivered:
@@ -164,6 +153,38 @@ Checks:
 - `python -m pytest tests\harness -q`: 8 passed.
 - `python -m pytest -q`: 46 passed.
 - `python -m compileall app tests`: passed.
+
+## Phase 8 Results
+
+Delivered:
+
+- `app/scouts` package with Scout profiles and task construction.
+- Role profiles for Social Scout, Code & Model Scout, Research Scout, Official Scout, and Finance Scout.
+- Source-type, category, signal-status, follow-up, official-evidence, and finance-impact validation rules.
+- Scout profile prompt extensions wired into `create_default_agent_role_registry`.
+- `ScoutTaskFactory` for role-specific `AgentTask` creation with profile context and candidate output contract.
+- Materialization-time profile validation in `ScoutOutputMaterializer`.
+- Candidate metadata that records the producing Scout profile.
+- Lazy `ScoutTaskFactory` export to avoid circular imports between AgentScope registry and harness task construction.
+- Tests for profile registry coverage, task creation, invalid profile rejection, and all five Scout closed loops through AgentScope tool calls.
+
+Checks:
+
+- `python -m pytest tests\scouts tests\harness\test_all_scouts_closed_loop.py tests\harness\test_single_agent_closed_loop.py tests\agents\test_registry.py -q`: 8 passed.
+- `python -m pytest -q`: 52 passed.
+- `python -m compileall app tests`: passed.
+
+## Immediate Next Step
+
+Phase 9: Clusterer.
+
+Initial scope:
+
+- Replace bootstrap cluster creation with a real Clusterer path.
+- Group related candidates into canonical event clusters.
+- Preserve conflicting evidence instead of overwriting it.
+- Generate deterministic dedupe keys.
+- Link early signals and later official confirmations when they refer to the same underlying event.
 
 ## Definition of Done for Each Phase
 

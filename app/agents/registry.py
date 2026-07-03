@@ -11,6 +11,7 @@ from app.agents.outputs import (
 )
 from app.agents.prompts import ROLE_PROMPTS
 from app.domain import AgentRole
+from app.scouts.profiles import create_default_scout_profile_registry
 from app.tools import ToolRegistry
 
 
@@ -55,6 +56,7 @@ def create_default_agent_role_registry(tool_registry: ToolRegistry) -> AgentRole
     """Create role configs using registered tool permissions."""
 
     registry = AgentRoleRegistry()
+    scout_profiles = create_default_scout_profile_registry()
     for role in AgentRole:
         if role == AgentRole.SYSTEM:
             continue
@@ -72,11 +74,15 @@ def create_default_agent_role_registry(tool_registry: ToolRegistry) -> AgentRole
         else:
             output_model = AgentStructuredOutput
 
+        system_prompt = ROLE_PROMPTS[role]
+        if role in SCOUT_ROLES:
+            system_prompt = f"{system_prompt}\n\n{scout_profiles.require(role).prompt_extension()}"
+
         registry.register(
             AgentRoleConfig(
                 role=role,
                 display_name=role.value.replace("_", " ").title(),
-                system_prompt=ROLE_PROMPTS[role],
+                system_prompt=system_prompt,
                 allowed_tool_names=[
                     spec.name for spec in tool_registry.list_for_agent(role)
                 ],

@@ -307,7 +307,15 @@ Complete:
 
 Acceptance:
 
-- Each scout has role boundary, tools, schema, follow-up rules, and fixtures.
+- Each Scout has a `ScoutProfile`.
+- Each Scout has source-type, candidate-category, signal-status, follow-up, and focus-topic boundaries.
+- Official Scout requires strong or official evidence-strength claims.
+- Finance Scout requires ticker or impact-chain relevance.
+- AgentScope role prompts include Scout profile constraints.
+- `ScoutTaskFactory` can create all five role-specific Scout tasks with profile context.
+- `ScoutOutputMaterializer` validates Scout outputs before candidate persistence.
+- All five Scouts can run through AgentScope tool calls and produce materialized candidates.
+- Invalid Scout output is rejected before persistence.
 
 ### Phase 9: Clusterer
 
