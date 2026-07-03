@@ -13,6 +13,7 @@ from app.harness.decisions import (
 )
 from app.harness.exceptions import HarnessError
 from app.harness.gates import QualityGateService
+from app.harness.materialization import MaterializationResult, ScoutOutputMaterializer
 from app.harness.runner import DailyRunHarness
 from app.harness.writing import WritingLoopHarness
 
@@ -26,7 +27,9 @@ __all__ = [
     "HarnessConfig",
     "HarnessContext",
     "HarnessError",
+    "MaterializationResult",
     "QualityGateService",
+    "ScoutOutputMaterializer",
     "WritingGateDecision",
     "WritingGateOutcome",
     "WritingLoopHarness",

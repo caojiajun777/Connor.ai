@@ -4,9 +4,9 @@ Last updated: 2026-07-03
 
 ## Current Status
 
-Project state: Phase 6 complete. Connor.ai now has domain contracts, persistence, tracing/artifacts, tools, AgentScope-first execution, and a tested loop harness.
+Project state: Phase 7 complete. Connor.ai now has a tested single-AgentScope-Scout closed loop from tool call to evidence, candidate, provisional cluster/evaluation, collect gate, trace, and persistence.
 
-Next phase: Phase 7, Single-Agent Closed Loop.
+Next phase: Phase 8, All Scouts.
 
 ## Phase Progress
 
@@ -18,7 +18,7 @@ Next phase: Phase 7, Single-Agent Closed Loop.
 | 4 | Tool Contract and Registry | Complete | ToolSpec, ToolRegistry, ToolExecutor, manual seed/mock tools, evidence normalization, and tool tests delivered. |
 | 5 | AgentScope Integration | Complete | AgentScope is a main dependency; AgentRunner uses AgentScope Agent/Toolkit/FunctionTool directly. |
 | 6 | Loop Harness | Complete | DailyRunHarness, collect loop, writing loop, quality gates, budgets, trace, and artifact snapshots delivered. |
-| 7 | Single-Agent Closed Loop | Not started | First end-to-end agent path. |
+| 7 | Single-Agent Closed Loop | Complete | One Social Scout path now runs through AgentScope tool call, evidence, candidate materialization, bootstrap cluster/evaluation, and collect gate. |
 | 8 | All Scouts | Not started | Five scout roles. |
 | 9 | Clusterer | Not started | Candidate dedupe and canonical claims. |
 | 10 | Evaluator Group | Not started | Frontier, Event, Market evaluators. |
@@ -138,14 +138,32 @@ Checks:
 
 ## Immediate Next Step
 
-Phase 7: Single-Agent Closed Loop.
+Phase 8: All Scouts.
 
 Initial scope:
 
-- Build one complete Scout path inside the Phase 6 harness.
-- Use AgentScope `AgentRunner` and a real Connor tool.
-- Persist evidence and candidate output from one agent task.
-- Prove the run can move through collect gate with a single-agent item.
+- Expand single-agent materialization to all Scout roles.
+- Add role-specific scout task templates and source/tool boundaries.
+- Ensure Social, Code & Model, Research, Official, and Finance scouts can each produce valid candidate drafts.
+- Keep Clusterer/Evaluator bootstrap clearly marked until Phase 9/10 replace it.
+
+## Phase 7 Results
+
+Delivered:
+
+- `CandidateDraft` schema and `ScoutOutput.candidate_drafts`.
+- `ScoutOutputMaterializer` for converting Scout outputs into persisted `CandidateItem` records.
+- Single-agent bootstrap creation of marked provisional `EventCluster` and `EvaluationResult` records when no explicit Clusterer/Evaluator tasks are scheduled.
+- Collect loop integration that materializes AgentScope Scout results after tool execution.
+- Run lineage updates for generated candidate and cluster ids.
+- Trace events for candidate, cluster, and evaluation creation.
+- Phase 7 test proving AgentScope `ToolCallBlock -> manual_seed -> EvidenceItem -> CandidateItem -> EventCluster -> EvaluationResult -> collect gate enter_writing`.
+
+Checks:
+
+- `python -m pytest tests\harness -q`: 8 passed.
+- `python -m pytest -q`: 46 passed.
+- `python -m compileall app tests`: passed.
 
 ## Definition of Done for Each Phase
 

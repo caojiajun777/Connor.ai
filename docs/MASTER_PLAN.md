@@ -289,6 +289,9 @@ Acceptance:
 - Call tool.
 - Create evidence.
 - Create candidate.
+- Materialize candidate through Connor boundary, not direct agent DB writes.
+- Create marked provisional cluster/evaluation only when no explicit Clusterer/Evaluator task exists.
+- Collect gate can enter writing from the single-agent generated item.
 - Write trace.
 - Persist all outputs.
 

@@ -454,3 +454,58 @@ Open follow-ups:
 - Build one real Scout path inside the harness.
 - Convert one AgentScope agent output into persisted evidence and candidate objects.
 - Add richer AgentScope event-stream tracing once streamed execution is used.
+
+### Phase 7 Complete: Single-Agent Closed Loop
+
+What we did:
+
+- Added `CandidateDraft` to the agent output layer.
+- Extended `ScoutOutput` with `candidate_drafts`.
+- Added `ScoutOutputMaterializer` in `app/harness/materialization.py`.
+- Connected Scout output materialization into `CollectLoopHarness`.
+- Added harness config flags for Scout candidate materialization and single-agent bootstrap.
+- Implemented candidate persistence from Scout structured output.
+- Implemented marked provisional cluster and evaluation creation when no explicit Clusterer/Evaluator tasks are scheduled.
+- Updated run lineage with generated candidate and cluster ids.
+- Added trace events for candidate, cluster, and evaluation creation.
+- Added a Phase 7 closed-loop test using AgentScope `ToolCallBlock`, Connor `manual_seed`, `ToolExecutor`, `EvidenceItem`, Scout `candidate_drafts`, materialization, and collect gate entry into writing.
+- Added Phase 7 plan documentation and ADR 0009.
+
+Why:
+
+- Phase 6 proved loop control using preloaded domain state. Phase 7 needed to prove an AgentScope Scout can create new persisted Connor domain state through the real tool and trace boundaries.
+- Agents should propose candidates, but Connor should validate and persist them through a materialization boundary.
+- The single-agent bootstrap cluster/evaluation path lets the collect gate close one full loop before the production Clusterer and Evaluator phases are implemented.
+
+Files changed:
+
+- `app/agents/__init__.py`
+- `app/agents/outputs.py`
+- `app/harness/__init__.py`
+- `app/harness/collect.py`
+- `app/harness/config.py`
+- `app/harness/materialization.py`
+- `tests/harness/test_single_agent_closed_loop.py`
+- `docs/MASTER_PLAN.md`
+- `docs/PROGRESS.md`
+- `docs/plans/phase-07-single-agent-closed-loop.md`
+- `docs/adr/0009-scout-output-materialization.md`
+- `docs/DEV_LOG.md`
+
+Checks:
+
+- `python -m pytest tests\harness -q`: 8 passed.
+- `python -m pytest -q`: 46 passed.
+- `python -m compileall app tests`: passed.
+
+Effect:
+
+- Phase 7 is complete.
+- Connor.ai now has one tested AgentScope Scout closed loop from tool call to evidence, candidate, provisional cluster/evaluation, collect gate, trace, and persistence.
+- The bootstrap records are explicitly marked with `bootstrap_single_agent: true`, preserving the boundary for later production Clusterer/Evaluator work.
+
+Open follow-ups:
+
+- Start Phase 8: All Scouts.
+- Add role-specific candidate draft expectations for Social, Code & Model, Research, Official, and Finance Scouts.
+- Replace bootstrap clustering/evaluation with full Clusterer and Evaluator agents in Phases 9 and 10.

@@ -5,7 +5,14 @@ from typing import Any
 from pydantic import Field, model_validator
 
 from app.domain.base import ConnorBaseModel, NonEmptyStr
-from app.domain.enums import EvaluationDecision, ReviewDecision
+from app.domain.enums import (
+    CandidateCategory,
+    ConfidenceLevel,
+    EvaluationDecision,
+    EvidenceStrength,
+    ReviewDecision,
+    SignalStatus,
+)
 
 
 class AgentStructuredOutput(ConnorBaseModel):
@@ -24,13 +31,40 @@ class AgentStructuredOutput(ConnorBaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class CandidateDraft(ConnorBaseModel):
+    """Scout-proposed candidate content to be materialized by the harness."""
+
+    category: CandidateCategory
+    signal_status: SignalStatus | None = None
+    claim_summary: NonEmptyStr
+    entities: list[str] = Field(default_factory=list)
+    tickers: list[str] = Field(default_factory=list)
+    topics: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+    uncertainty: ConfidenceLevel = ConfidenceLevel.UNKNOWN
+    evidence_strength: EvidenceStrength = EvidenceStrength.UNKNOWN
+    why_it_matters: str | None = None
+    potential_impact: str | None = None
+    followup_questions: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class ScoutOutput(AgentStructuredOutput):
     """Structured Scout output."""
 
+    candidate_drafts: list[CandidateDraft] = Field(default_factory=list)
+
     @model_validator(mode="after")
     def validate_scout_output(self) -> "ScoutOutput":
-        if not (self.evidence_ids or self.candidate_ids or self.followup_queries):
-            raise ValueError("scout output requires evidence, candidates, or follow-up queries")
+        if not (
+            self.evidence_ids
+            or self.candidate_ids
+            or self.candidate_drafts
+            or self.followup_queries
+        ):
+            raise ValueError(
+                "scout output requires evidence, candidates, candidate drafts, or follow-up queries"
+            )
         return self
 
 
@@ -82,4 +116,3 @@ class EditorOutput(AgentStructuredOutput):
         if not self.edited_report_ids:
             raise ValueError("editor output requires edited_report_ids")
         return self
-

@@ -4,6 +4,7 @@ from app.agents.agentscope_tools import AgentScopeToolBridge, ConnorFunctionTool
 from app.agents.config import AgentExecutionConfig, AgentRoleConfig
 from app.agents.outputs import (
     AgentStructuredOutput,
+    CandidateDraft,
     EditorOutput,
     EvaluatorOutput,
     ReviewerOutput,
@@ -29,6 +30,7 @@ __all__ = [
     "AgentScopeModelFactory",
     "AgentScopeToolBridge",
     "AgentStructuredOutput",
+    "CandidateDraft",
     "ConnorFunctionTool",
     "EditorOutput",
     "EvaluatorOutput",

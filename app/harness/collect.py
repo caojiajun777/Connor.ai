@@ -11,6 +11,7 @@ from app.harness.context import HarnessContext
 from app.harness.decisions import AgentTask, CollectGateDecision, CollectGateOutcome
 from app.harness.exceptions import HarnessError
 from app.harness.gates import QualityGateService
+from app.harness.materialization import ScoutOutputMaterializer
 
 
 COLLECT_TASK_LIMITS = {
@@ -32,6 +33,7 @@ class CollectLoopHarness:
     ):
         self.context = context
         self.gate_service = gate_service or QualityGateService(context.config)
+        self.materializer = ScoutOutputMaterializer(context)
 
     def run(
         self,
@@ -147,6 +149,16 @@ class CollectLoopHarness:
                 )
             )
             tool_call_count += len(result.tool_results)
+            if phase == RunPhase.SCOUTING and self.context.config.materialize_scout_candidates:
+                self.materializer.materialize(
+                    run=run,
+                    phase=phase,
+                    agent_role=task.agent_role,
+                    result=result,
+                    bootstrap_cluster_and_evaluation=self._should_bootstrap_single_agent(
+                        tasks_by_phase
+                    ),
+                )
 
         latest_run = self.context.runs.require(run.id)
         counters = latest_run.loop_counters.model_copy(
@@ -160,6 +172,17 @@ class CollectLoopHarness:
             run_id=run.id,
             phase=phase,
             summary=f"{phase.value} phase completed.",
+        )
+
+    def _should_bootstrap_single_agent(
+        self,
+        tasks_by_phase: Mapping[RunPhase, list[AgentTask]],
+    ) -> bool:
+        return (
+            self.context.config.bootstrap_single_agent_clusters
+            and self.context.config.bootstrap_single_agent_evaluations
+            and not tasks_by_phase.get(RunPhase.CLUSTERING)
+            and not tasks_by_phase.get(RunPhase.EVALUATING)
         )
 
     def _record_gate_decision(self, run: RunState, decision: CollectGateDecision) -> None:
