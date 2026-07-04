@@ -358,10 +358,14 @@ Implement cost-aware memory.
 
 Acceptance:
 
-- Watch items expire.
-- Expired items archive.
-- Archive can reactivate through new evidence.
-- Threads show historical evolution.
+- Watchlist Agent returns structured watchlist, archive, and thread drafts.
+- Connor materializes those drafts into `WatchlistItem`, `ArchivedSignal`, and `IntelligenceThread`.
+- Watch items expire through deterministic lifecycle policy.
+- Expired items archive without deleting historical state.
+- Evaluator decisions can create default memory when no Watchlist Agent task is scheduled.
+- Archive records preserve lineage and reactivation hints.
+- Threads show historical evolution across signals, watches, archives, confirmations, and later outcomes.
+- Collect loop injects memory context into Watchlist Agent tasks.
 
 ### Phase 12: Writing Loop
 

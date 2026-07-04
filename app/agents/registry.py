@@ -8,12 +8,14 @@ from app.agents.outputs import (
     EvaluatorOutput,
     ReviewerOutput,
     ScoutOutput,
+    WatchlistAgentOutput,
     WriterOutput,
 )
 from app.agents.prompts import ROLE_PROMPTS
 from app.domain import AgentRole
 from app.evaluators.profiles import create_default_evaluator_profile_registry
 from app.scouts.profiles import create_default_scout_profile_registry
+from app.watchlist.tasks import watchlist_prompt_extension
 from app.tools import ToolRegistry
 
 
@@ -70,6 +72,8 @@ def create_default_agent_role_registry(tool_registry: ToolRegistry) -> AgentRole
             output_model = ClustererOutput
         elif role in EVALUATOR_ROLES:
             output_model = EvaluatorOutput
+        elif role == AgentRole.WATCHLIST_AGENT:
+            output_model = WatchlistAgentOutput
         elif role == AgentRole.WRITER:
             output_model = WriterOutput
         elif role == AgentRole.REVIEWER:
@@ -86,6 +90,8 @@ def create_default_agent_role_registry(tool_registry: ToolRegistry) -> AgentRole
             system_prompt = (
                 f"{system_prompt}\n\n{evaluator_profiles.require(role).prompt_extension()}"
             )
+        if role == AgentRole.WATCHLIST_AGENT:
+            system_prompt = f"{system_prompt}\n\n{watchlist_prompt_extension()}"
 
         registry.register(
             AgentRoleConfig(

@@ -768,3 +768,75 @@ Open follow-ups:
 - Start Phase 11: Watchlist + Archive + Intelligence Threads.
 - Convert evaluator decisions such as `short_watch`, `followup_later`, `archive`, and selected clusters into cost-aware memory objects.
 - Preserve historical logic chains without letting active watchlist size grow without bounds.
+
+### Phase 11 Complete: Watchlist, Archive, and Intelligence Threads
+
+What we did:
+
+- Added structured Watchlist Agent output schemas: `WatchlistDraft`, `ArchiveDraft`, `ThreadTimelineDraft`, `ThreadDraft`, and `WatchlistAgentOutput`.
+- Bound `AgentRole.WATCHLIST_AGENT` to `WatchlistAgentOutput`.
+- Added a Watchlist Agent prompt extension for TTLs, archive behavior, and intelligence threads.
+- Added the `app/watchlist` package with task construction, memory context shaping, materialization, and deterministic lifecycle service.
+- Added `WatchlistOutputMaterializer` for creating/updating `WatchlistItem`, `ArchivedSignal`, and `IntelligenceThread` records.
+- Added `WatchlistLifecycleService` for due-watch expiration and default evaluator-memory sync.
+- Connected watchlist materialization, due expiration, and memory-context injection into `CollectLoopHarness`.
+- Added harness config flags for watchlist output materialization, due expiration, and evaluator-memory auto-sync.
+- Added trace object mappings for watchlist, archive, and thread records.
+- Added centralized ID prefixes for watchlist, archive, and thread objects.
+- Added collect-gate metrics for watchlist, archive, and thread counts.
+- Added Phase 11 tests and documentation.
+
+Why:
+
+- Evaluator decisions need to become durable memory, not just one-run decisions.
+- Watchlist growth must be bounded so long-running operation does not become too expensive.
+- Archive should preserve historical signals instead of deleting them.
+- Intelligence Threads are the foundation for later logic-chain analysis across days.
+- The Watchlist Agent should make memory proposals through AgentScope, while Connor owns persistence, lifecycle, and trace.
+
+Files changed:
+
+- `app/agents/__init__.py`
+- `app/agents/outputs.py`
+- `app/agents/registry.py`
+- `app/core/ids.py`
+- `app/harness/collect.py`
+- `app/harness/config.py`
+- `app/harness/gates.py`
+- `app/services/tracing.py`
+- `app/watchlist/__init__.py`
+- `app/watchlist/tasks.py`
+- `app/watchlist/materialization.py`
+- `app/watchlist/lifecycle.py`
+- `tests/agents/test_registry.py`
+- `tests/watchlist/__init__.py`
+- `tests/watchlist/test_materialization.py`
+- `tests/watchlist/test_lifecycle.py`
+- `tests/harness/test_watchlist_closed_loop.py`
+- `docs/MASTER_PLAN.md`
+- `docs/PROGRESS.md`
+- `docs/plans/phase-11-watchlist-archive-threads.md`
+- `docs/adr/0013-watchlist-lifecycle-boundary.md`
+- `docs/DEV_LOG.md`
+
+Checks:
+
+- `python -m pytest tests\watchlist tests\harness\test_watchlist_closed_loop.py tests\agents\test_registry.py -q`: 6 passed.
+- `python -m pytest -q`: 76 passed.
+- `python -m compileall app tests`: passed.
+
+Effect:
+
+- Phase 11 is complete.
+- Connor.ai now has an AgentScope Watchlist Agent path for watchlist/archive/thread proposals.
+- Connor can create active watch items, archive stale or low-value signals, and maintain intelligence thread timelines.
+- Due watch items can expire automatically into archives.
+- When no Watchlist Agent task is scheduled, evaluator decisions can still create conservative default memory.
+- Watchlist, archive, and thread updates are now visible in trace timelines.
+
+Open follow-ups:
+
+- Start Phase 12: Writing Loop.
+- Materialize Writer, Reviewer, and Editor outputs into report and review records.
+- Generate `full_markdown`, `full_json`, `evidence_map`, `watchlist_updates`, and `trace_timeline`.
+- Ensure Reviewer blocks reports that write early signals as confirmed facts.

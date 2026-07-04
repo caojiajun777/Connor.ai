@@ -4,6 +4,7 @@ from app.agents.agentscope_tools import AgentScopeToolBridge, ConnorFunctionTool
 from app.agents.config import AgentExecutionConfig, AgentRoleConfig
 from app.agents.outputs import (
     AgentStructuredOutput,
+    ArchiveDraft,
     CandidateDraft,
     ClusterDraft,
     ClusterTimelineDraft,
@@ -13,6 +14,10 @@ from app.agents.outputs import (
     EvaluatorOutput,
     ReviewerOutput,
     ScoutOutput,
+    ThreadDraft,
+    ThreadTimelineDraft,
+    WatchlistAgentOutput,
+    WatchlistDraft,
     WriterOutput,
 )
 from app.agents.registry import AgentRoleRegistry, create_default_agent_role_registry
@@ -34,6 +39,7 @@ __all__ = [
     "AgentScopeModelFactory",
     "AgentScopeToolBridge",
     "AgentStructuredOutput",
+    "ArchiveDraft",
     "CandidateDraft",
     "ClusterDraft",
     "ClusterTimelineDraft",
@@ -44,6 +50,10 @@ __all__ = [
     "EvaluatorOutput",
     "ReviewerOutput",
     "ScoutOutput",
+    "ThreadDraft",
+    "ThreadTimelineDraft",
+    "WatchlistAgentOutput",
+    "WatchlistDraft",
     "WriterOutput",
     "create_default_agent_role_registry",
 ]

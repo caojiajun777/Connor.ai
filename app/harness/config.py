@@ -20,5 +20,8 @@ class HarnessConfig(ConnorBaseModel):
     materialize_scout_candidates: bool = True
     materialize_clusterer_outputs: bool = True
     materialize_evaluator_outputs: bool = True
+    materialize_watchlist_outputs: bool = True
+    expire_due_watchlist_items: bool = True
+    auto_materialize_watchlist_from_evaluations: bool = True
     bootstrap_single_agent_clusters: bool = True
     bootstrap_single_agent_evaluations: bool = True

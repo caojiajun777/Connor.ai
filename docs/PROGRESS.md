@@ -4,9 +4,9 @@ Last updated: 2026-07-04
 
 ## Current Status
 
-Project state: Phase 10 complete. Connor.ai now has a real AgentScope Evaluator Group path with structured evaluation drafts, role profiles, Connor-owned evaluation materialization, selected-cluster marking, trace, and collect-gate integration.
+Project state: Phase 11 complete. Connor.ai now has cost-aware Watchlist, Archive, and Intelligence Thread memory with AgentScope Watchlist Agent output, deterministic lifecycle fallback, TTL expiration, trace, and tests.
 
-Next phase: Phase 11, Watchlist + Archive + Intelligence Threads.
+Next phase: Phase 12, Writing Loop.
 
 ## Phase Progress
 
@@ -22,7 +22,7 @@ Next phase: Phase 11, Watchlist + Archive + Intelligence Threads.
 | 8 | All Scouts | Complete | Five Scout profiles, task templates, prompt constraints, materialization validation, and all-Scout closed-loop tests delivered. |
 | 9 | Clusterer | Complete | ClustererOutput, ClusterOutputMaterializer, dedupe merge, confirmation links, conflict preservation, and closed-loop tests delivered. |
 | 10 | Evaluator Group | Complete | Frontier/Event/Market profiles, evaluation drafts, materialization, trace, and closed-loop test delivered. |
-| 11 | Watchlist + Archive + Intelligence Threads | Not started | Cost-aware memory and logic chains. |
+| 11 | Watchlist + Archive + Intelligence Threads | Complete | Watchlist Agent output, lifecycle service, TTL archive, thread updates, and closed-loop test delivered. |
 | 12 | Writing Loop | Not started | Writer, Reviewer, Editor loop. |
 | 13 | FastAPI and Dashboard Contract | Not started | External API contract. |
 | 14 | Source Expansion | Not started | Real source breadth after core reliability. |
@@ -220,17 +220,40 @@ Checks:
 - `python -m pytest -q`: 71 passed.
 - `python -m compileall app tests`: passed.
 
+## Phase 11 Results
+
+Delivered:
+
+- `WatchlistDraft`, `ArchiveDraft`, `ThreadTimelineDraft`, `ThreadDraft`, and `WatchlistAgentOutput`.
+- Agent registry binding for `AgentRole.WATCHLIST_AGENT -> WatchlistAgentOutput`.
+- `app/watchlist` package with task construction, compact memory context, materialization, and lifecycle policy.
+- Watchlist Agent prompt extension for cost-aware memory, TTLs, archive, and intelligence threads.
+- `WatchlistOutputMaterializer` for validating lineage, creating/updating watchlist items, archiving signals, creating/updating threads, updating run lineage, and writing trace events.
+- `WatchlistLifecycleService` for automatic due-watch expiration and deterministic evaluator-memory sync when no Watchlist Agent task is scheduled.
+- Collect loop integration for `WATCHLIST_UPDATE` materialization, due expiration, memory-context injection, and evaluator-memory fallback.
+- Harness config flags for watchlist materialization, due expiration, and evaluator-memory auto-sync.
+- Trace object mapping for WatchlistItem, ArchivedSignal, and IntelligenceThread.
+- Centralized ID prefixes for watch, archive, and thread records.
+- Collect-gate metrics for watchlist, archive, and thread counts.
+- Tests for materialization, lifecycle, AgentScope Watchlist Agent closed loop, and registry prompt wiring.
+
+Checks:
+
+- `python -m pytest tests\watchlist tests\harness\test_watchlist_closed_loop.py tests\agents\test_registry.py -q`: 6 passed.
+- `python -m pytest -q`: 76 passed.
+- `python -m compileall app tests`: passed.
+
 ## Immediate Next Step
 
-Phase 11: Watchlist + Archive + Intelligence Threads.
+Phase 12: Writing Loop.
 
 Initial scope:
 
-- Create watchlist items from evaluator decisions.
-- Enforce short-term TTLs and due/expired checks.
-- Archive expired, stale, superseded, disproven, or low-value signals without deleting history.
-- Add intelligence threads that connect early signals, confirmations, archives, and later outcomes.
-- Keep watchlist cost bounded while preserving long-term logical chains.
+- Add structured Writer drafts that create `DailyReport` records.
+- Add Reviewer materialization into `ReviewResult` and `ReviewIssue`.
+- Add Editor materialization for revised reports.
+- Generate `full_markdown`, `full_json`, `evidence_map`, `watchlist_updates`, and `trace_timeline`.
+- Enforce that early signals are not written as confirmed facts.
 
 ## Definition of Done for Each Phase
 

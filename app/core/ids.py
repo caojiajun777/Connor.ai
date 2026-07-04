@@ -14,14 +14,17 @@ class IdPrefix(str, Enum):
     """Known persisted object id prefixes."""
 
     ARTIFACT = "art"
+    ARCHIVE = "arch"
     CANDIDATE = "cand"
     CLUSTER = "cl"
     EVALUATION = "eval"
     EVIDENCE = "ev"
     MODEL_CALL = "model"
     RUN = "run"
+    THREAD = "thread"
     TOOL_CALL = "tool"
     TRACE_EVENT = "trace"
+    WATCHLIST = "watch"
 
 
 def deterministic_id(prefix: IdPrefix | str, payload: Any, *, length: int = 32) -> str:

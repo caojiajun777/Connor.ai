@@ -14,6 +14,7 @@ from app.core.ids import random_id
 from app.db.models import TraceEventRecord
 from app.domain import (
     AgentRole,
+    ArchivedSignal,
     Artifact,
     ArtifactKind,
     ArtifactRef,
@@ -23,6 +24,7 @@ from app.domain import (
     EvaluationResult,
     EvidenceItem,
     EventCluster,
+    IntelligenceThread,
     ModelCallRecord,
     ModelCallStatus,
     ObjectRef,
@@ -34,6 +36,7 @@ from app.domain import (
     TraceEvent,
     TraceEventType,
     TraceStatus,
+    WatchlistItem,
 )
 from app.domain.base import DomainModel, utc_now
 from app.repositories import (
@@ -50,6 +53,9 @@ DOMAIN_OBJECT_TYPES: dict[type[BaseModel], ObjectType] = {
     CandidateItem: ObjectType.CANDIDATE,
     EventCluster: ObjectType.CLUSTER,
     EvaluationResult: ObjectType.EVALUATION,
+    WatchlistItem: ObjectType.WATCHLIST,
+    ArchivedSignal: ObjectType.ARCHIVE,
+    IntelligenceThread: ObjectType.THREAD,
     DailyReport: ObjectType.REPORT,
     ReviewResult: ObjectType.REVIEW,
     TraceEvent: ObjectType.TRACE_EVENT,

@@ -16,6 +16,9 @@ from app.harness.decisions import AgentTask, CollectGateDecision, CollectGateOut
 from app.harness.exceptions import HarnessError
 from app.harness.gates import QualityGateService
 from app.harness.materialization import ScoutOutputMaterializer
+from app.watchlist.lifecycle import WatchlistLifecycleService
+from app.watchlist.materialization import WatchlistOutputMaterializer
+from app.watchlist.tasks import WatchlistTaskFactory
 
 
 COLLECT_TASK_LIMITS = {
@@ -40,6 +43,8 @@ class CollectLoopHarness:
         self.materializer = ScoutOutputMaterializer(context)
         self.cluster_materializer = ClusterOutputMaterializer(context)
         self.evaluator_materializer = EvaluatorOutputMaterializer(context)
+        self.watchlist_materializer = WatchlistOutputMaterializer(context)
+        self.watchlist_lifecycle = WatchlistLifecycleService(context)
 
     def run(
         self,
@@ -136,6 +141,9 @@ class CollectLoopHarness:
         if tasks and self.context.agent_runner is None:
             raise HarnessError(f"{phase.value} tasks require an AgentRunner")
 
+        if phase == RunPhase.WATCHLIST_UPDATE and self.context.config.expire_due_watchlist_items:
+            self.watchlist_lifecycle.expire_due_items(run=run, phase=phase)
+
         tool_call_count = 0
         for task in tasks:
             if task.phase != phase:
@@ -177,6 +185,20 @@ class CollectLoopHarness:
                     agent_role=task.agent_role,
                     result=result,
                 )
+            if phase == RunPhase.WATCHLIST_UPDATE and self.context.config.materialize_watchlist_outputs:
+                self.watchlist_materializer.materialize(
+                    run=run,
+                    phase=phase,
+                    agent_role=task.agent_role,
+                    result=result,
+                )
+
+        if (
+            phase == RunPhase.WATCHLIST_UPDATE
+            and not tasks
+            and self.context.config.auto_materialize_watchlist_from_evaluations
+        ):
+            self.watchlist_lifecycle.sync_evaluation_memory(run=run, phase=phase)
 
         latest_run = self.context.runs.require(run.id)
         counters = latest_run.loop_counters.model_copy(
@@ -236,6 +258,17 @@ class CollectLoopHarness:
                 clusters=full_state.clusters,
                 candidates=full_state.candidates,
                 evidence=full_state.evidence,
+            )
+        if phase == RunPhase.WATCHLIST_UPDATE:
+            full_state = self.context.runs.get_full_state(run.id)
+            context["memory_context"] = WatchlistTaskFactory.memory_context(
+                evaluations=full_state.evaluations,
+                clusters=full_state.clusters,
+                candidates=full_state.candidates,
+                evidence=full_state.evidence,
+                watchlist=full_state.watchlist,
+                archives=full_state.archives,
+                threads=full_state.threads,
             )
         return context
 

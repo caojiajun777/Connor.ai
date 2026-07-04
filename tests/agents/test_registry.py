@@ -4,6 +4,7 @@ from app.agents import (
     ClustererOutput,
     EvaluatorOutput,
     ScoutOutput,
+    WatchlistAgentOutput,
     WriterOutput,
     create_default_agent_role_registry,
 )
@@ -18,14 +19,18 @@ def test_default_agent_role_registry_binds_output_models_and_tools() -> None:
     social_config = agent_registry.require(AgentRole.SOCIAL_SCOUT)
     clusterer_config = agent_registry.require(AgentRole.CLUSTERER)
     frontier_config = agent_registry.require(AgentRole.FRONTIER_EVALUATOR)
+    watchlist_config = agent_registry.require(AgentRole.WATCHLIST_AGENT)
     writer_config = agent_registry.require(AgentRole.WRITER)
 
     assert social_config.output_model is ScoutOutput
     assert clusterer_config.output_model is ClustererOutput
     assert frontier_config.output_model is EvaluatorOutput
+    assert watchlist_config.output_model is WatchlistAgentOutput
     assert writer_config.output_model is WriterOutput
     assert "Evaluator profile:" in frontier_config.system_prompt
     assert "information_gap" in frontier_config.system_prompt
+    assert "Watchlist memory profile:" in watchlist_config.system_prompt
+    assert "archive_drafts" in watchlist_config.system_prompt
     assert "manual_seed" in social_config.allowed_tool_names
     assert "mock_search" in frontier_config.allowed_tool_names
     assert "manual_seed" not in writer_config.allowed_tool_names
