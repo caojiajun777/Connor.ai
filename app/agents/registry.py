@@ -12,6 +12,7 @@ from app.agents.outputs import (
 )
 from app.agents.prompts import ROLE_PROMPTS
 from app.domain import AgentRole
+from app.evaluators.profiles import create_default_evaluator_profile_registry
 from app.scouts.profiles import create_default_scout_profile_registry
 from app.tools import ToolRegistry
 
@@ -58,6 +59,7 @@ def create_default_agent_role_registry(tool_registry: ToolRegistry) -> AgentRole
 
     registry = AgentRoleRegistry()
     scout_profiles = create_default_scout_profile_registry()
+    evaluator_profiles = create_default_evaluator_profile_registry()
     for role in AgentRole:
         if role == AgentRole.SYSTEM:
             continue
@@ -80,6 +82,10 @@ def create_default_agent_role_registry(tool_registry: ToolRegistry) -> AgentRole
         system_prompt = ROLE_PROMPTS[role]
         if role in SCOUT_ROLES:
             system_prompt = f"{system_prompt}\n\n{scout_profiles.require(role).prompt_extension()}"
+        if role in EVALUATOR_ROLES:
+            system_prompt = (
+                f"{system_prompt}\n\n{evaluator_profiles.require(role).prompt_extension()}"
+            )
 
         registry.register(
             AgentRoleConfig(

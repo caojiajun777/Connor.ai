@@ -703,3 +703,68 @@ Open follow-ups:
 
 - Phase 10 should replace `bootstrap_clusterer_evaluation` with real evaluator materialization.
 - A later persistence phase can add ORM relationships if Dashboard read paths need richer eager-loading behavior than payload union reconstruction.
+
+### Phase 10 Complete: Evaluator Group
+
+What we did:
+
+- Added `EvaluationDraft` and extended `EvaluatorOutput` so AgentScope evaluator agents can return complete structured evaluation proposals.
+- Added the `app/evaluators` package with evaluator profiles, task construction, compact cluster context, and materialization.
+- Defined role profiles for Frontier Evaluator, Event Evaluator, and Market Evaluator.
+- Wired evaluator profile prompt extensions into the default AgentScope role registry.
+- Added `EvaluatorTaskFactory` so evaluator tasks carry a profile and evaluation output contract.
+- Added `EvaluatorOutputMaterializer` to validate drafts, create `EvaluationResult` records, mark selected clusters, update run metadata, and write `EVALUATION_CREATED` trace events.
+- Connected evaluator materialization and `cluster_context` injection into `CollectLoopHarness`.
+- Added a `materialize_evaluator_outputs` harness config flag.
+- Added tests for profile validation, task context, materialization, invalid draft rejection, AgentScope closed-loop execution, and registry prompt wiring.
+- Added Phase 10 plan documentation and ADR 0012.
+
+Why:
+
+- Phase 9 still used marked `bootstrap_clusterer_evaluation` records when no evaluator task existed.
+- Connor.ai needs real evaluator agents before Watchlist, Archive, Intelligence Threads, and report writing can rely on judgment outcomes.
+- Early Signals need looser selection standards than Confirmed Events, but both must remain auditable and traceable.
+- AgentScope should execute evaluator agents, while Connor should own validation, persistence, trace, and gate integration.
+
+Files changed:
+
+- `app/agents/__init__.py`
+- `app/agents/outputs.py`
+- `app/agents/registry.py`
+- `app/evaluators/__init__.py`
+- `app/evaluators/profiles.py`
+- `app/evaluators/tasks.py`
+- `app/evaluators/materialization.py`
+- `app/harness/collect.py`
+- `app/harness/config.py`
+- `tests/agents/test_registry.py`
+- `tests/evaluators/__init__.py`
+- `tests/evaluators/test_profiles.py`
+- `tests/evaluators/test_materialization.py`
+- `tests/harness/test_evaluator_closed_loop.py`
+- `docs/MASTER_PLAN.md`
+- `docs/PROGRESS.md`
+- `docs/plans/phase-10-evaluator-group.md`
+- `docs/adr/0012-evaluator-materialization-boundary.md`
+- `docs/DEV_LOG.md`
+
+Checks:
+
+- `python -m pytest tests\evaluators tests\harness\test_evaluator_closed_loop.py tests\agents\test_registry.py -q`: 10 passed.
+- `python -m pytest -q`: 71 passed.
+- `python -m compileall app tests`: passed.
+
+Effect:
+
+- Phase 10 is complete.
+- Connor.ai now has a real Frontier/Event/Market Evaluator group path.
+- AgentScope evaluator output can become persistent `EvaluationResult` records through a typed Connor materialization boundary.
+- The collect gate can enter writing from real evaluator decisions rather than temporary clusterer bootstrap evaluations.
+- Frontier evaluation preserves the looser, trackability-first standard for early signals.
+- Event and Market evaluation keep stricter requirements for confirmed facts and finance impact chains.
+
+Open follow-ups:
+
+- Start Phase 11: Watchlist + Archive + Intelligence Threads.
+- Convert evaluator decisions such as `short_watch`, `followup_later`, `archive`, and selected clusters into cost-aware memory objects.
+- Preserve historical logic chains without letting active watchlist size grow without bounds.

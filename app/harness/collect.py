@@ -9,6 +9,8 @@ from app.clusterer.materialization import ClusterOutputMaterializer
 from app.clusterer.tasks import ClusterTaskFactory
 from app.domain import AgentRole, RunPhase, RunState, RunStatus, TraceEventType, TraceStatus
 from app.domain.base import utc_now
+from app.evaluators.materialization import EvaluatorOutputMaterializer
+from app.evaluators.tasks import EvaluatorTaskFactory
 from app.harness.context import HarnessContext
 from app.harness.decisions import AgentTask, CollectGateDecision, CollectGateOutcome
 from app.harness.exceptions import HarnessError
@@ -37,6 +39,7 @@ class CollectLoopHarness:
         self.gate_service = gate_service or QualityGateService(context.config)
         self.materializer = ScoutOutputMaterializer(context)
         self.cluster_materializer = ClusterOutputMaterializer(context)
+        self.evaluator_materializer = EvaluatorOutputMaterializer(context)
 
     def run(
         self,
@@ -167,6 +170,13 @@ class CollectLoopHarness:
                         tasks_by_phase
                     ),
                 )
+            if phase == RunPhase.EVALUATING and self.context.config.materialize_evaluator_outputs:
+                self.evaluator_materializer.materialize(
+                    run=run,
+                    phase=phase,
+                    agent_role=task.agent_role,
+                    result=result,
+                )
 
         latest_run = self.context.runs.require(run.id)
         counters = latest_run.loop_counters.model_copy(
@@ -217,6 +227,13 @@ class CollectLoopHarness:
         if phase == RunPhase.CLUSTERING:
             full_state = self.context.runs.get_full_state(run.id)
             context["candidate_context"] = ClusterTaskFactory.candidate_context(
+                candidates=full_state.candidates,
+                evidence=full_state.evidence,
+            )
+        if phase == RunPhase.EVALUATING:
+            full_state = self.context.runs.get_full_state(run.id)
+            context["cluster_context"] = EvaluatorTaskFactory.cluster_context(
+                clusters=full_state.clusters,
                 candidates=full_state.candidates,
                 evidence=full_state.evidence,
             )

@@ -19,5 +19,6 @@ class HarnessConfig(ConnorBaseModel):
     archive_loop_snapshots: bool = True
     materialize_scout_candidates: bool = True
     materialize_clusterer_outputs: bool = True
+    materialize_evaluator_outputs: bool = True
     bootstrap_single_agent_clusters: bool = True
     bootstrap_single_agent_evaluations: bool = True

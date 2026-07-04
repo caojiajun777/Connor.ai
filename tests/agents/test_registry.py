@@ -24,6 +24,8 @@ def test_default_agent_role_registry_binds_output_models_and_tools() -> None:
     assert clusterer_config.output_model is ClustererOutput
     assert frontier_config.output_model is EvaluatorOutput
     assert writer_config.output_model is WriterOutput
+    assert "Evaluator profile:" in frontier_config.system_prompt
+    assert "information_gap" in frontier_config.system_prompt
     assert "manual_seed" in social_config.allowed_tool_names
     assert "mock_search" in frontier_config.allowed_tool_names
     assert "manual_seed" not in writer_config.allowed_tool_names

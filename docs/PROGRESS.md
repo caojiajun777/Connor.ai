@@ -1,12 +1,12 @@
 # Connor.ai Progress Tracker
 
-Last updated: 2026-07-03
+Last updated: 2026-07-04
 
 ## Current Status
 
-Project state: Phase 9 complete. Connor.ai now has a real AgentScope Clusterer path with structured cluster drafts, Connor-owned cluster materialization, dedupe-key merge, conflict preservation, early-signal to official-confirmation links, trace, and tests.
+Project state: Phase 10 complete. Connor.ai now has a real AgentScope Evaluator Group path with structured evaluation drafts, role profiles, Connor-owned evaluation materialization, selected-cluster marking, trace, and collect-gate integration.
 
-Next phase: Phase 10, Evaluator Group.
+Next phase: Phase 11, Watchlist + Archive + Intelligence Threads.
 
 ## Phase Progress
 
@@ -21,7 +21,7 @@ Next phase: Phase 10, Evaluator Group.
 | 7 | Single-Agent Closed Loop | Complete | One Social Scout path now runs through AgentScope tool call, evidence, candidate materialization, bootstrap cluster/evaluation, and collect gate. |
 | 8 | All Scouts | Complete | Five Scout profiles, task templates, prompt constraints, materialization validation, and all-Scout closed-loop tests delivered. |
 | 9 | Clusterer | Complete | ClustererOutput, ClusterOutputMaterializer, dedupe merge, confirmation links, conflict preservation, and closed-loop tests delivered. |
-| 10 | Evaluator Group | Not started | Frontier, Event, Market evaluators. |
+| 10 | Evaluator Group | Complete | Frontier/Event/Market profiles, evaluation drafts, materialization, trace, and closed-loop test delivered. |
 | 11 | Watchlist + Archive + Intelligence Threads | Not started | Cost-aware memory and logic chains. |
 | 12 | Writing Loop | Not started | Writer, Reviewer, Editor loop. |
 | 13 | FastAPI and Dashboard Contract | Not started | External API contract. |
@@ -198,17 +198,39 @@ Checks:
 - `python -m pytest -q`: 56 passed.
 - `python -m compileall app tests`: passed.
 
+## Phase 10 Results
+
+Delivered:
+
+- `EvaluationDraft` structured output for evaluator agents.
+- `EvaluatorOutput.evaluation_drafts` support while preserving backward compatibility with existing evaluation ids and decisions.
+- `app/evaluators` package with role profiles, task factory, compact cluster context, and materializer.
+- Frontier Evaluator profile for looser early-signal selection based on information gap, specificity, source proximity, potential impact, and trackability.
+- Event Evaluator profile for confirmed events and official updates with strict `select_confirmed` requirements.
+- Market Evaluator profile for tech-finance clusters with AI relevance, market impact, supply-chain impact, and ticker relevance.
+- Evaluator profile prompt extensions wired into `create_default_agent_role_registry`.
+- `EvaluatorOutputMaterializer` for validating drafts, creating `EvaluationResult` records, marking selected clusters, updating run metadata, and writing `EVALUATION_CREATED` trace events.
+- Collect loop integration for evaluator materialization and `cluster_context` injection.
+- Harness config flag `materialize_evaluator_outputs`.
+- Tests for evaluator profiles, task context, materialization, invalid draft rejection, prompt wiring, and AgentScope Frontier Evaluator closed loop.
+
+Checks:
+
+- `python -m pytest tests\evaluators tests\harness\test_evaluator_closed_loop.py tests\agents\test_registry.py -q`: 10 passed.
+- `python -m pytest -q`: 71 passed.
+- `python -m compileall app tests`: passed.
+
 ## Immediate Next Step
 
-Phase 10: Evaluator Group.
+Phase 11: Watchlist + Archive + Intelligence Threads.
 
 Initial scope:
 
-- Add structured evaluator drafts for Frontier, Event, and Market evaluators.
-- Materialize evaluator outputs into `EvaluationResult`.
-- Replace `bootstrap_clusterer_evaluation`.
-- Preserve early-signal looser standards while enforcing confirmed-event and market-impact rules.
-- Route follow-up, watch, archive, select, and recluster decisions through the collect gate.
+- Create watchlist items from evaluator decisions.
+- Enforce short-term TTLs and due/expired checks.
+- Archive expired, stale, superseded, disproven, or low-value signals without deleting history.
+- Add intelligence threads that connect early signals, confirmations, archives, and later outcomes.
+- Keep watchlist cost bounded while preserving long-term logical chains.
 
 ## Definition of Done for Each Phase
 

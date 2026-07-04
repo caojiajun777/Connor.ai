@@ -9,6 +9,7 @@ from app.domain.enums import (
     CandidateCategory,
     ConfidenceLevel,
     EvaluationDecision,
+    EvaluationType,
     EvidenceStrength,
     ReviewDecision,
     SignalStatus,
@@ -111,15 +112,39 @@ class ClustererOutput(AgentStructuredOutput):
         return self
 
 
+class EvaluationDraft(ConnorBaseModel):
+    """Evaluator-proposed decision to be materialized by the harness."""
+
+    cluster_id: NonEmptyStr
+    evaluator_type: EvaluationType
+    dimension_scores: dict[str, float]
+    total_score: float
+    decision: EvaluationDecision
+    reasoning_summary: NonEmptyStr
+    risk_flags: list[str] = Field(default_factory=list)
+    required_followups: list[str] = Field(default_factory=list)
+    missing_evidence: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_evaluation_draft(self) -> "EvaluationDraft":
+        if not self.dimension_scores:
+            raise ValueError("evaluation drafts require dimension_scores")
+        return self
+
+
 class EvaluatorOutput(AgentStructuredOutput):
     """Structured Evaluator output."""
 
     decisions: list[EvaluationDecision] = Field(default_factory=list)
+    evaluation_drafts: list[EvaluationDraft] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_evaluator_output(self) -> "EvaluatorOutput":
-        if not (self.evaluation_ids or self.decisions):
-            raise ValueError("evaluator output requires evaluation_ids or decisions")
+        if not (self.evaluation_ids or self.decisions or self.evaluation_drafts):
+            raise ValueError(
+                "evaluator output requires evaluation_ids, decisions, or evaluation_drafts"
+            )
         return self
 
 

@@ -1,6 +1,6 @@
 # Connor.ai Master Plan
 
-Last updated: 2026-07-03
+Last updated: 2026-07-04
 
 ## 1. Product Intent
 
@@ -343,9 +343,14 @@ Implement:
 
 Acceptance:
 
-- Evaluation decisions are structured.
+- Evaluator agents return structured `EvaluationDraft` records through AgentScope.
+- Connor materializes evaluator drafts into `EvaluationResult` records.
+- Frontier/Event/Market evaluator profiles define allowed categories, decisions, and score dimensions.
 - Early signal standards are intentionally looser than confirmed-event standards.
-- Follow-up, watch, archive, and select outcomes are clear.
+- Confirmed-event selection requires no missing evidence and sufficient score.
+- Market evaluation requires AI relevance, market impact, supply-chain impact, and ticker relevance.
+- Collect loop injects cluster context into evaluator tasks.
+- Evaluator decisions write trace events and drive collect-gate outcomes.
 
 ### Phase 11: Watchlist, Archive, and Intelligence Threads
 
