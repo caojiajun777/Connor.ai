@@ -1,7 +1,9 @@
 """Run repository and full-state reconstruction."""
 
 from dataclasses import dataclass
+from typing import Any
 
+from sqlalchemy import literal, select, union_all
 from sqlalchemy.orm import Session
 
 from app.db.models import RunRecord
@@ -18,6 +20,7 @@ from app.domain import (
     ReviewIssue,
     ReviewResult,
     RunState,
+    ThreadStatus,
     ToolCallRecord,
     TraceEvent,
     WatchlistItem,
@@ -95,24 +98,65 @@ class RunRepository(DomainRepository[RunState, RunRecord]):
 
     def get_full_state(self, run_id: str) -> FullRunState:
         run = self.require(run_id)
+        child_payloads = self._list_run_child_payloads(run_id)
+        active_thread_statuses = [
+            ThreadStatus.ACTIVE.value,
+            ThreadStatus.DORMANT.value,
+            ThreadStatus.ARCHIVED.value,
+            ThreadStatus.RESOLVED.value,
+        ]
+        threads = self.threads.list_by_statuses(active_thread_statuses)
         return FullRunState(
             run=run,
-            evidence=self.evidence.list_by_run(run_id),
-            candidates=self.candidates.list_by_run(run_id),
-            clusters=self.clusters.list_by_run(run_id),
-            evaluations=self.evaluations.list_by_run(run_id),
-            watchlist=self.watchlist.list_by_run(run_id),
-            archives=self.archives.list_by_run(run_id),
-            threads=self.threads.list_by_status("active")
-            + self.threads.list_by_status("dormant")
-            + self.threads.list_by_status("archived")
-            + self.threads.list_by_status("resolved"),
-            reports=self.reports.list_by_run(run_id),
-            trace_events=self.traces.list_timeline(run_id),
-            tool_calls=self.tool_calls.list_by_run(run_id),
-            model_calls=self.model_calls.list_by_run(run_id),
-            artifacts=self.artifacts.list_by_run(run_id),
-            review_results=self.review_results.list_by_run(run_id),
-            review_issues=self.review_issues.list_by_run(run_id),
+            evidence=self._hydrate_child(child_payloads, "evidence", EvidenceItem),
+            candidates=self._hydrate_child(child_payloads, "candidates", CandidateItem),
+            clusters=self._hydrate_child(child_payloads, "clusters", EventCluster),
+            evaluations=self._hydrate_child(child_payloads, "evaluations", EvaluationResult),
+            watchlist=self._hydrate_child(child_payloads, "watchlist", WatchlistItem),
+            archives=self._hydrate_child(child_payloads, "archives", ArchivedSignal),
+            threads=threads,
+            reports=self._hydrate_child(child_payloads, "reports", DailyReport),
+            trace_events=self._hydrate_child(child_payloads, "trace_events", TraceEvent),
+            tool_calls=self._hydrate_child(child_payloads, "tool_calls", ToolCallRecord),
+            model_calls=self._hydrate_child(child_payloads, "model_calls", ModelCallRecord),
+            artifacts=self._hydrate_child(child_payloads, "artifacts", Artifact),
+            review_results=self._hydrate_child(child_payloads, "review_results", ReviewResult),
+            review_issues=self._hydrate_child(child_payloads, "review_issues", ReviewIssue),
         )
+
+    def _list_run_child_payloads(self, run_id: str) -> dict[str, list[dict[str, Any]]]:
+        repositories = {
+            "evidence": self.evidence,
+            "candidates": self.candidates,
+            "clusters": self.clusters,
+            "evaluations": self.evaluations,
+            "watchlist": self.watchlist,
+            "archives": self.archives,
+            "reports": self.reports,
+            "trace_events": self.traces,
+            "tool_calls": self.tool_calls,
+            "model_calls": self.model_calls,
+            "artifacts": self.artifacts,
+            "review_results": self.review_results,
+            "review_issues": self.review_issues,
+        }
+        statements = [
+            select(
+                literal(name).label("collection"),
+                repository.record_model.payload.label("payload"),
+            ).where(repository.record_model.run_id == run_id)
+            for name, repository in repositories.items()
+        ]
+        rows = self.session.execute(union_all(*statements)).all()
+        payloads = {name: [] for name in repositories}
+        for collection, payload in rows:
+            payloads[collection].append(payload)
+        return payloads
+
+    @staticmethod
+    def _hydrate_child(payloads: dict[str, list[dict[str, Any]]], name: str, model):
+        objects = [model.model_validate(payload) for payload in payloads[name]]
+        if name == "trace_events":
+            return sorted(objects, key=lambda item: item.seq)
+        return sorted(objects, key=lambda item: item.created_at)
 

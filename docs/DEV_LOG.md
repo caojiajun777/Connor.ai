@@ -630,3 +630,76 @@ Open follow-ups:
 - Start Phase 10: Evaluator Group.
 - Replace `bootstrap_clusterer_evaluation` with Frontier/Event/Market evaluator materialization.
 - Add structured evaluator scoring rules for early signals, confirmed events, and tech-finance clusters.
+
+## 2026-07-04
+
+### Infrastructure Review Fixes: Watchlist, Harness Errors, Full State, Clusterer Boundary, IDs
+
+What we did:
+
+- Reviewed six externally flagged issues against the current codebase.
+- Confirmed and fixed the `WatchlistRepository.list_active_due()` comparison direction.
+- Replaced hard-coded watchlist status strings with `WatchStatus` enum values.
+- Changed `DailyRunHarness.run()` so unexpected exceptions are no longer swallowed.
+- Ensured both `HarnessError` and non-`HarnessError` failures persist FAILED run state before re-raising.
+- Added full traceback storage in failed run trace events through `HarnessContext.fail_run(error_detail=...)`.
+- Made `DailyRunHarness.resume()` refuse direct resume from `FAILED` state.
+- Reduced `RunRepository.get_full_state()` query fanout by loading run-scoped child payloads through one `UNION ALL` query and loading thread statuses with one `IN` query.
+- Added `app/exceptions.py` and kept `app/harness/exceptions.py` as a compatibility re-export.
+- Replaced Clusterer materializer's `context: Any` with a `ClusterMaterializationContext` Protocol.
+- Removed Clusterer materializer's delayed harness exception import.
+- Added `app/core/ids.py` with `IdPrefix`, `deterministic_id()`, and `random_id()`.
+- Migrated runtime ID generation in tracing, artifacts, tool evidence, daily run ids, Scout materialization, and Clusterer materialization to the centralized ID helpers.
+- Added a workspace-local `tmp_path` fixture so tests run under the current restricted Windows sandbox.
+
+Why:
+
+- Phase 11 watchlist cleanup would be incorrect if due items were queried as `watch_until >= before`.
+- Silent unexpected exceptions would make production debugging and tests dangerously misleading.
+- FAILED resume semantics needed to be explicit before adding manual recovery flows.
+- Full run reconstruction is on the future Dashboard hot path and should avoid avoidable query fanout.
+- Clusterer should depend on stable core exceptions and an explicit context protocol, not a harness import cycle and `Any`.
+- ID generation should be consistent and provide more entropy than scattered 8/16-char truncation.
+
+Files changed:
+
+- `.gitignore`
+- `app/core/__init__.py`
+- `app/core/ids.py`
+- `app/exceptions.py`
+- `app/clusterer/materialization.py`
+- `app/harness/context.py`
+- `app/harness/exceptions.py`
+- `app/harness/materialization.py`
+- `app/harness/runner.py`
+- `app/repositories/domain.py`
+- `app/repositories/runs.py`
+- `app/services/artifacts.py`
+- `app/services/tracing.py`
+- `app/tools/executor.py`
+- `tests/conftest.py`
+- `tests/core/__init__.py`
+- `tests/core/test_ids.py`
+- `tests/harness/test_daily_run_harness.py`
+- `tests/repositories/test_repository_persistence.py`
+- `docs/DEV_LOG.md`
+
+Checks:
+
+- `python -m pytest -q`: 62 passed.
+- `python -m compileall app tests`: passed.
+
+Effect:
+
+- Watchlist due querying now returns active/reactivated expired items correctly.
+- Unexpected harness bugs are visible to callers and preserve traceback in trace records.
+- FAILED runs cannot be resumed implicitly.
+- Full run reconstruction now uses batched payload loading instead of many independent child repository queries.
+- Clusterer materialization has a typed context boundary and no delayed harness exception import.
+- Runtime ID generation now goes through one shared helper module.
+- Tests are stable in the current workspace-restricted environment.
+
+Open follow-ups:
+
+- Phase 10 should replace `bootstrap_clusterer_evaluation` with real evaluator materialization.
+- A later persistence phase can add ORM relationships if Dashboard read paths need richer eager-loading behavior than payload union reconstruction.

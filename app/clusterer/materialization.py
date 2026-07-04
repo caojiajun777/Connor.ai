@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Protocol
 
 from app.agents.outputs import ClusterDraft, ClustererOutput
+from app.core.ids import deterministic_id
+from app.exceptions import HarnessError
 from app.agents.schemas import AgentRunResult
 from app.domain import (
     AgentRole,
@@ -24,11 +24,14 @@ from app.domain import (
     TraceEventType,
 )
 from app.domain.base import utc_now
+from app.services import TraceService
+from sqlalchemy.orm import Session
 from app.repositories import (
     CandidateRepository,
     EvaluationRepository,
     EventClusterRepository,
     EvidenceRepository,
+    RunRepository,
 )
 
 
@@ -36,6 +39,17 @@ CONFIRMED_CATEGORIES = {
     CandidateCategory.CONFIRMED_EVENT,
     CandidateCategory.OFFICIAL_UPDATE,
 }
+
+
+class ClusterMaterializationContext(Protocol):
+    """Context interface required by ClusterOutputMaterializer."""
+
+    session: Session
+    trace_service: TraceService
+    runs: RunRepository
+
+    def persist_run(self, run: RunState) -> RunState:
+        """Persist an updated RunState."""
 
 
 @dataclass
@@ -49,7 +63,7 @@ class ClusterMaterializationResult:
 class ClusterOutputMaterializer:
     """Persist Clusterer cluster drafts and optional evaluator bootstrap records."""
 
-    def __init__(self, context: Any):
+    def __init__(self, context: ClusterMaterializationContext):
         self.context = context
         self.candidates = CandidateRepository(context.session)
         self.evidence = EvidenceRepository(context.session)
@@ -69,7 +83,7 @@ class ClusterOutputMaterializer:
 
         self.context.session.flush()
         if agent_role != AgentRole.CLUSTERER:
-            raise _harness_error(
+            raise HarnessError(
                 f"cluster materialization requires clusterer role, got {agent_role.value}"
             )
         if not isinstance(result.structured_output, ClustererOutput):
@@ -175,9 +189,9 @@ class ClusterOutputMaterializer:
             try:
                 candidate = self.candidates.require(candidate_id)
             except LookupError as exc:
-                raise _harness_error(str(exc)) from exc
+                raise HarnessError(str(exc)) from exc
             if candidate.run_id != run_id:
-                raise _harness_error(f"candidate {candidate_id} does not belong to run {run_id}")
+                raise HarnessError(f"candidate {candidate_id} does not belong to run {run_id}")
             candidates[candidate_id] = candidate
         return candidates
 
@@ -192,7 +206,7 @@ class ClusterOutputMaterializer:
                 evidence_ids.extend(candidate.evidence_ids)
         evidence_ids = ClusterOutputMaterializer._dedupe(evidence_ids)
         if not evidence_ids:
-            raise _harness_error("cluster drafts require evidence_ids or candidate evidence")
+            raise HarnessError("cluster drafts require evidence_ids or candidate evidence")
         return evidence_ids
 
     def _timeline_entries(
@@ -266,8 +280,7 @@ class ClusterOutputMaterializer:
             "topics": sorted(ClusterOutputMaterializer._dedupe([item.lower() for item in topics]))[:4],
             "claim": ClusterOutputMaterializer._slug(draft.canonical_claim)[:80],
         }
-        encoded = json.dumps(basis, sort_keys=True, ensure_ascii=False).encode("utf-8")
-        return f"{draft.category.value}:{hashlib.sha256(encoded).hexdigest()[:16]}"
+        return deterministic_id(draft.category.value, basis)
 
     def _create_bootstrap_evaluation(self, *, run: RunState, cluster: EventCluster) -> EvaluationResult:
         evaluator_type, evaluator_role, decision = self._evaluation_policy(cluster)
@@ -355,15 +368,8 @@ class ClusterOutputMaterializer:
 
     @staticmethod
     def _stable_id(prefix: str, payload: dict) -> str:
-        encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
-        return f"{prefix}_{hashlib.sha256(encoded).hexdigest()[:16]}"
+        return deterministic_id(prefix, payload)
 
     @staticmethod
     def _slug(value: str) -> str:
         return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
-
-
-def _harness_error(message: str) -> Exception:
-    from app.harness.exceptions import HarnessError
-
-    return HarnessError(message)

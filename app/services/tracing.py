@@ -5,11 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
-from uuid import uuid4
 
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from app.core.ids import random_id
 
 from app.db.models import TraceEventRecord
 from app.domain import (
@@ -457,4 +457,4 @@ class TraceService:
 
     @staticmethod
     def _new_id(prefix: str) -> str:
-        return f"{prefix}_{uuid4().hex}"
+        return random_id(prefix)

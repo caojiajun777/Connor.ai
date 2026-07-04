@@ -9,12 +9,12 @@ from datetime import date, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.core.ids import IdPrefix, random_id
 from app.domain import Artifact, ArtifactKind, ArtifactStorage
 from app.domain.base import reject_forbidden_reasoning_keys, utc_now
 from app.repositories import ArtifactRepository
@@ -181,7 +181,7 @@ class ArtifactService:
 
     @staticmethod
     def _new_artifact_id(kind: ArtifactKind, sha256: str) -> str:
-        return f"art_{kind.value}_{sha256[:12]}_{uuid4().hex[:8]}"
+        return random_id(IdPrefix.ARTIFACT, parts=[kind.value, sha256[:16]], length=16)
 
     @staticmethod
     def _json_safe(value: Any) -> Any:

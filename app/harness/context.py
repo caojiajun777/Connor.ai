@@ -74,7 +74,14 @@ class HarnessContext:
         self.trace_service.phase_completed(run_id=run_id, phase=phase, summary=summary)
         self.session.flush()
 
-    def fail_run(self, run: RunState, *, error_summary: str, phase: RunPhase | None = None) -> RunState:
+    def fail_run(
+        self,
+        run: RunState,
+        *,
+        error_summary: str,
+        phase: RunPhase | None = None,
+        error_detail: str | None = None,
+    ) -> RunState:
         failed = run.model_copy(
             update={
                 "phase": phase or RunPhase.FAILED,
@@ -90,7 +97,7 @@ class HarnessContext:
             event_type=TraceEventType.ERROR,
             status=TraceStatus.FAILED,
             summary="Run failed.",
-            error=error_summary,
+            error=error_detail or error_summary,
             metadata={"harness": True},
         )
         self.session.flush()

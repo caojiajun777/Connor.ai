@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import dataclass, field
 
 from app.agents.outputs import CandidateDraft, ScoutOutput
+from app.core.ids import deterministic_id
 from app.agents.schemas import AgentRunResult
 from app.domain import (
     AgentRole,
@@ -315,8 +314,7 @@ class ScoutOutputMaterializer:
 
     @staticmethod
     def _stable_id(prefix: str, payload: dict) -> str:
-        encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
-        return f"{prefix}_{hashlib.sha256(encoded).hexdigest()[:16]}"
+        return deterministic_id(prefix, payload)
 
     @staticmethod
     def _title_from_claim(claim: str) -> str:

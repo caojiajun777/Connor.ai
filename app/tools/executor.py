@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import time
 from typing import Any
 
 from pydantic import ValidationError
+from app.core.ids import deterministic_id
 from sqlalchemy.orm import Session
 
 from app.domain import (
@@ -193,10 +192,8 @@ class ToolExecutor:
             "title": item.title,
             "snippet": item.snippet,
         }
-        encoded = json.dumps(fingerprint_payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
-        digest = hashlib.sha256(encoded).hexdigest()[:16]
         safe_tool_name = "".join(
             character if character.isalnum() else "_" for character in spec.name.lower()
         )
-        return f"ev_{safe_tool_name}_{digest}"
+        return deterministic_id(f"ev_{safe_tool_name}", fingerprint_payload)
 

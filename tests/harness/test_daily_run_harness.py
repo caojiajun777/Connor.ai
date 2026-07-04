@@ -38,3 +38,52 @@ def test_daily_run_harness_collects_then_writes_final_report(db_session) -> None
     event_types = [event.event_type for event in timeline.events]
     assert "run_started" in event_types
     assert "report_finalized" in event_types
+
+
+def test_daily_run_harness_reraises_unexpected_exceptions_and_records_traceback(db_session) -> None:
+    import pytest
+
+    from app.domain import TraceEventType
+
+    harness = DailyRunHarness(db_session, config=HarnessConfig(min_selected_items=1))
+    run = harness.create_run(
+        run_id=RUN_ID,
+        report_date=run_state_fixture().report_date,
+        objective=run_state_fixture().objective,
+        budgets=RunBudgets(max_collect_rounds=2),
+    )
+
+    def explode(*args, **kwargs):
+        raise AttributeError("boom")
+
+    harness.collect_loop.run = explode
+
+    with pytest.raises(AttributeError, match="boom"):
+        harness.run(run)
+
+    failed = RunRepository(db_session).require(RUN_ID)
+    assert failed.status == "failed"
+    assert failed.error_summary == "boom"
+
+    timeline = TraceService(db_session).reconstruct_timeline(RUN_ID)
+    error_events = [event for event in timeline.events if event.event_type == TraceEventType.ERROR]
+    assert error_events
+    assert "Traceback" in error_events[-1].error
+    assert "AttributeError: boom" in error_events[-1].error
+
+
+def test_daily_run_harness_refuses_to_resume_failed_run(db_session) -> None:
+    import pytest
+
+    from app.domain import RunStatus
+    from app.harness import HarnessError
+
+    failed_run = run_state_fixture().model_copy(
+        update={"status": RunStatus.FAILED, "error_summary": "previous failure"}
+    )
+    RunRepository(db_session).add(failed_run)
+    db_session.flush()
+    harness = DailyRunHarness(db_session, config=HarnessConfig(min_selected_items=1))
+
+    with pytest.raises(HarnessError, match="failed runs cannot be resumed directly"):
+        harness.resume(RUN_ID)

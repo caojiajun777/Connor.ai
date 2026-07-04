@@ -1,5 +1,11 @@
 """Shared test fixtures."""
 
+from __future__ import annotations
+
+import shutil
+from pathlib import Path
+from uuid import uuid4
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -16,3 +22,15 @@ def db_session() -> Session:
     with SessionLocal() as session:
         yield session
 
+
+@pytest.fixture()
+def tmp_path(request) -> Path:
+    """Workspace-local tmp_path replacement for restricted Windows sandboxes."""
+
+    safe_name = "".join(character if character.isalnum() else "_" for character in request.node.name)
+    path = Path.cwd() / "test_tmp" / f"{safe_name}_{uuid4().hex}"
+    path.mkdir(parents=True, exist_ok=False)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)

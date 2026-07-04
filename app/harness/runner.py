@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
+import traceback
 from datetime import date
 from typing import Any
-from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
 from app.agents import AgentRunner
+from app.core.ids import IdPrefix, random_id
 from app.domain import RunBudgets, RunPhase, RunState, RunStatus, SourceType, TraceEventType, TraceStatus
 from app.domain.base import utc_now
 from app.harness.collect import CollectLoopHarness
 from app.harness.config import HarnessConfig
 from app.harness.context import HarnessContext
-from app.harness.decisions import AgentTask, CollectGateOutcome, DailyRunResult, WritingGateOutcome
+from app.harness.decisions import AgentTask, DailyRunResult
 from app.harness.exceptions import HarnessError
 from app.harness.gates import QualityGateService
 from app.harness.writing import WritingLoopHarness
@@ -89,6 +90,9 @@ class DailyRunHarness:
     ) -> DailyRunResult:
         """Run collect and writing loops from the provided run state."""
 
+        if run.status == RunStatus.FAILED:
+            raise HarnessError("failed runs cannot be resumed directly; reset the run explicitly first")
+
         collect_decisions = []
         writing_decisions = []
         try:
@@ -133,20 +137,14 @@ class DailyRunHarness:
                 },
             )
         except Exception as exc:
-            failed = self.context.fail_run(
-                self.context.runs.require(run.id),
+            latest_run = self.context.runs.require(run.id)
+            self.context.fail_run(
+                latest_run,
                 error_summary=str(exc),
-                phase=self.context.runs.require(run.id).phase,
+                error_detail=traceback.format_exc(),
+                phase=latest_run.phase,
             )
-            if isinstance(exc, HarnessError):
-                raise
-            return DailyRunResult(
-                run=failed,
-                collect_decisions=collect_decisions,
-                writing_decisions=writing_decisions,
-                final_report_id=failed.report_id,
-                metadata={"error": str(exc), "exception_type": type(exc).__name__},
-            )
+            raise
 
     def resume(
         self,
@@ -157,12 +155,15 @@ class DailyRunHarness:
     ) -> DailyRunResult:
         """Resume a persisted run by id."""
 
+        run = self.context.runs.require(run_id)
+        if run.status == RunStatus.FAILED:
+            raise HarnessError("failed runs cannot be resumed directly; reset the run explicitly first")
         return self.run(
-            self.context.runs.require(run_id),
+            run,
             collect_tasks_by_phase=collect_tasks_by_phase,
             writing_tasks_by_phase=writing_tasks_by_phase,
         )
 
     @staticmethod
     def _daily_run_id(report_date: date) -> str:
-        return f"run_{report_date.isoformat().replace('-', '_')}_{uuid4().hex[:8]}"
+        return random_id(IdPrefix.RUN, parts=[report_date.isoformat()], length=16)

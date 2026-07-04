@@ -189,3 +189,66 @@ def test_full_run_state_reconstructs_persisted_children(db_session) -> None:
     assert len(full_state.review_results) == 1
     assert len(full_state.review_issues) == 1
 
+
+
+def test_watchlist_repository_lists_only_active_due_items(db_session) -> None:
+    from datetime import timedelta
+
+    from app.domain import PriorityLevel, WatchStatus, WatchTier, WatchlistItem
+    from app.repositories import RunRepository, WatchlistRepository
+
+    RunRepository(db_session).add(run_state_fixture())
+    repo = WatchlistRepository(db_session)
+    due = WatchlistItem(
+        id="watch_due",
+        run_id=RUN_ID,
+        topic="Due watch",
+        thesis="This active watch is due for review.",
+        watch_tier=WatchTier.SHORT,
+        status=WatchStatus.ACTIVE,
+        priority=PriorityLevel.HIGH,
+        ttl_days=3,
+        watch_until=BASE_TIME - timedelta(minutes=1),
+        revisit_cadence_days=1,
+        reactivation_rules=["Reactivate on new evidence."],
+        created_at=BASE_TIME - timedelta(days=2),
+    )
+    future = due.model_copy(
+        update={
+            "id": "watch_future",
+            "topic": "Future watch",
+            "watch_until": BASE_TIME + timedelta(days=1),
+        }
+    )
+    cooling = due.model_copy(
+        update={
+            "id": "watch_cooling_due",
+            "topic": "Cooling watch",
+            "status": WatchStatus.COOLING,
+        }
+    )
+    repo.add_many([due, future, cooling])
+    db_session.flush()
+
+    assert [item.id for item in repo.list_active_due(before=BASE_TIME)] == ["watch_due"]
+
+
+def test_full_run_state_reconstruction_uses_batched_child_payload_query(db_session) -> None:
+    from sqlalchemy import event
+
+    repo = persist_representative_run(db_session)
+    statements = []
+
+    def before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    event.listen(db_session.bind, "before_cursor_execute", before_cursor_execute)
+    try:
+        full_state = repo.get_full_state(RUN_ID)
+    finally:
+        event.remove(db_session.bind, "before_cursor_execute", before_cursor_execute)
+
+    assert len(full_state.evidence) == 4
+    assert len(full_state.threads) == 1
+    assert len(statements) <= 4
+

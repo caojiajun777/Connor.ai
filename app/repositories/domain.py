@@ -33,6 +33,7 @@ from app.domain import (
     ToolCallRecord,
     TraceEvent,
     WatchlistItem,
+    WatchStatus,
 )
 from app.repositories.base import DomainRepository, enum_value
 
@@ -137,8 +138,8 @@ class WatchlistRepository(DomainRepository[WatchlistItem, WatchlistItemRecord]):
 
     def list_active_due(self, *, before) -> list[WatchlistItem]:
         stmt = select(WatchlistItemRecord).where(
-            WatchlistItemRecord.status.in_(["active", "reactivated"]),
-            WatchlistItemRecord.watch_until >= before,
+            WatchlistItemRecord.status.in_([WatchStatus.ACTIVE.value, WatchStatus.REACTIVATED.value]),
+            WatchlistItemRecord.watch_until <= before,
         )
         return [self.to_domain(record) for record in self.session.scalars(stmt)]
 
@@ -176,7 +177,10 @@ class IntelligenceThreadRepository(
         )
 
     def list_by_status(self, status: str) -> list[IntelligenceThread]:
-        stmt = select(IntelligenceThreadRecord).where(IntelligenceThreadRecord.status == status)
+        return self.list_by_statuses([status])
+
+    def list_by_statuses(self, statuses: list[str]) -> list[IntelligenceThread]:
+        stmt = select(IntelligenceThreadRecord).where(IntelligenceThreadRecord.status.in_(statuses))
         return [self.to_domain(record) for record in self.session.scalars(stmt)]
 
 
@@ -310,4 +314,3 @@ class ReviewIssueRepository(DomainRepository[ReviewIssue, ReviewIssueRecord]):
             title=obj.title,
             report_item_id=obj.report_item_id,
         )
-

@@ -7,3 +7,6 @@ pytest-cache-files-*/
 .venv/
 .env
 .env.*
+test_tmp/
+pytest_tmp*/
+.pytest_tmp/
