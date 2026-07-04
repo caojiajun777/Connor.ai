@@ -143,6 +143,14 @@ class WatchlistRepository(DomainRepository[WatchlistItem, WatchlistItemRecord]):
         )
         return [self.to_domain(record) for record in self.session.scalars(stmt)]
 
+    def list_by_statuses(self, statuses: list[str]) -> list[WatchlistItem]:
+        stmt = (
+            select(WatchlistItemRecord)
+            .where(WatchlistItemRecord.status.in_(statuses))
+            .order_by(WatchlistItemRecord.created_at)
+        )
+        return [self.to_domain(record) for record in self.session.scalars(stmt)]
+
 
 class ArchivedSignalRepository(DomainRepository[ArchivedSignal, ArchivedSignalRecord]):
     domain_model = ArchivedSignal
@@ -180,7 +188,11 @@ class IntelligenceThreadRepository(
         return self.list_by_statuses([status])
 
     def list_by_statuses(self, statuses: list[str]) -> list[IntelligenceThread]:
-        stmt = select(IntelligenceThreadRecord).where(IntelligenceThreadRecord.status.in_(statuses))
+        stmt = (
+            select(IntelligenceThreadRecord)
+            .where(IntelligenceThreadRecord.status.in_(statuses))
+            .order_by(IntelligenceThreadRecord.created_at)
+        )
         return [self.to_domain(record) for record in self.session.scalars(stmt)]
 
 

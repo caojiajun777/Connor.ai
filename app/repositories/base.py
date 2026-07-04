@@ -64,6 +64,10 @@ class DomainRepository(Generic[DomainT, RecordT]):
         )
         return [self.to_domain(record) for record in self.session.scalars(stmt)]
 
+    def list_all(self) -> list[DomainT]:
+        stmt = select(self.record_model).order_by(self.record_model.created_at)
+        return [self.to_domain(record) for record in self.session.scalars(stmt)]
+
     def delete(self, object_id: str) -> bool:
         record = self.session.get(self.record_model, object_id)
         if record is None:
@@ -86,4 +90,3 @@ class DomainRepository(Generic[DomainT, RecordT]):
             "updated_at": obj.updated_at,
             "payload": payload_from_domain(obj),
         }
-

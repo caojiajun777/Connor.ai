@@ -955,3 +955,65 @@ Open follow-ups:
 - Start Phase 13: FastAPI and Dashboard Contract.
 - Expose run, report, trace, cluster, watchlist, and thread endpoints.
 - Add dashboard-facing schemas over the structured daily report payload.
+
+### Phase 13: FastAPI and Dashboard Contract
+
+What we did:
+
+- Added FastAPI and uvicorn to project dependencies.
+- Added `app/api` package with app factory, dependencies, routes, and public response schemas.
+- Added ASGI entrypoint at `app/main.py`.
+- Implemented `POST /runs/daily`.
+- Implemented `GET /runs/{run_id}`.
+- Implemented `GET /runs/{run_id}/trace`.
+- Implemented `GET /runs/{run_id}/clusters`.
+- Implemented `GET /reports/{report_id}`.
+- Implemented `GET /watchlist`.
+- Implemented `GET /threads`.
+- Implemented `GET /threads/{thread_id}`.
+- Added explicit duplicate-run conflict handling for `POST /runs/daily`.
+- Added repository helpers for dashboard list endpoints.
+- Added API tests with a thread-safe SQLite StaticPool setup for FastAPI TestClient.
+- Added Phase 13 plan and ADR 0015.
+
+Why:
+
+- The Next.js Dashboard needs a stable backend contract before frontend work.
+- API endpoints should expose persisted, traceable Connor state without owning agent loop execution.
+- Scheduled run creation is safe through the harness, while full execution should wait for worker/queue boundaries.
+- Dashboard reads should go through repositories/services, not raw ORM row access.
+
+Files changed:
+
+- `pyproject.toml`
+- `app/api/__init__.py`
+- `app/api/dependencies.py`
+- `app/api/main.py`
+- `app/api/routes.py`
+- `app/api/schemas.py`
+- `app/main.py`
+- `app/repositories/base.py`
+- `app/repositories/domain.py`
+- `tests/api/__init__.py`
+- `tests/api/test_routes.py`
+- `docs/PROGRESS.md`
+- `docs/plans/phase-13-fastapi-dashboard-contract.md`
+- `docs/adr/0015-fastapi-dashboard-boundary.md`
+- `docs/DEV_LOG.md`
+
+Checks:
+
+- `python -m pytest tests\api\test_routes.py -q`: 3 passed.
+- `python -m pytest -q`: 91 passed.
+- `python -m compileall app tests`: passed.
+- `git diff --check`: passed.
+
+Effect:
+
+- Connor.ai now has a FastAPI contract for runs, reports, trace, clusters, watchlist, and threads.
+- Dashboard responses expose `full_markdown`, `full_json`, `evidence_map`, `watchlist_updates`, and trace IDs from persisted reports.
+- API creation/read behavior is covered by HTTP-level tests.
+
+Open follow-ups:
+
+- Start Phase 14: real source expansion, beginning with GitHub / Hugging Face.

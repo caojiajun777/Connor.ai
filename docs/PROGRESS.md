@@ -4,9 +4,9 @@ Last updated: 2026-07-04
 
 ## Current Status
 
-Project state: Phase 12 complete. Connor.ai now has a real AgentScope-first Writing Loop where Writer, Reviewer, and Editor outputs are materialized into DailyReport, ReviewResult, ReviewIssue, full markdown, dashboard JSON, evidence maps, watchlist updates, and trace-backed final reports.
+Project state: Phase 13 complete. Connor.ai now exposes a FastAPI dashboard contract for runs, reports, trace timelines, clusters, watchlist items, and intelligence threads.
 
-Next phase: Phase 13, FastAPI and Dashboard Contract.
+Next phase: Phase 14, Source Expansion.
 
 ## Phase Progress
 
@@ -24,7 +24,7 @@ Next phase: Phase 13, FastAPI and Dashboard Contract.
 | 10 | Evaluator Group | Complete | Frontier/Event/Market profiles, evaluation drafts, materialization, trace, and closed-loop test delivered. |
 | 11 | Watchlist + Archive + Intelligence Threads | Complete | Watchlist Agent output, lifecycle service, TTL archive, thread updates, and closed-loop test delivered. |
 | 12 | Writing Loop | Complete | Writer/Reviewer/Editor draft materialization, report JSON/markdown/evidence map generation, reviewer uncertainty guard, and closed-loop tests delivered. |
-| 13 | FastAPI and Dashboard Contract | Not started | External API contract. |
+| 13 | FastAPI and Dashboard Contract | Complete | FastAPI app, dashboard response schemas, run/report/trace/cluster/watchlist/thread endpoints, and API tests delivered. |
 | 14 | Source Expansion | Not started | Real source breadth after core reliability. |
 
 ## Phase 1 Results
@@ -269,16 +269,40 @@ Checks:
 - `python -m compileall app tests`: passed.
 - `git diff --check`: passed.
 
+## Phase 13 Results
+
+Delivered:
+
+- FastAPI dependency declarations.
+- `app/api` package with app factory, routes, dependencies, and public schemas.
+- ASGI entrypoint at `app/main.py`.
+- `POST /runs/daily` for scheduled run creation.
+- `GET /runs/{run_id}` for dashboard-ready full run state.
+- `GET /runs/{run_id}/trace` for replayable trace timelines.
+- `GET /runs/{run_id}/clusters` for run cluster lists.
+- `GET /reports/{report_id}` for markdown, dashboard JSON, evidence map, watchlist updates, and trace IDs.
+- `GET /watchlist` with optional status/run filtering.
+- `GET /threads` and `GET /threads/{thread_id}`.
+- Repository `list_all` helper and stable status-query ordering.
+- API tests using FastAPI `TestClient` and thread-safe SQLite `StaticPool`.
+- Phase 13 plan and ADR 0015.
+
+Checks:
+
+- `python -m pytest tests\api\test_routes.py -q`: 3 passed.
+- `python -m pytest -q`: 91 passed.
+- `python -m compileall app tests`: passed.
+- `git diff --check`: passed.
+
 ## Immediate Next Step
 
-Phase 13: FastAPI and Dashboard Contract.
+Phase 14: Source Expansion.
 
 Initial scope:
 
-- Add FastAPI app structure.
-- Expose stable run, report, trace, cluster, watchlist, and thread endpoints.
-- Define Dashboard response schemas without leaking internal chain-of-thought.
-- Add endpoint tests against the current repository/service layer.
+- Add real source connectors in a controlled order.
+- Start with GitHub / Hugging Face because they fit current evidence and code/model scout contracts.
+- Preserve the same tool envelope, evidence, artifact, and trace boundaries.
 
 ## Definition of Done for Each Phase
 
