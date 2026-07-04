@@ -51,16 +51,18 @@ ROLE_PROMPTS: dict[AgentRole, str] = {
     ),
     AgentRole.WRITER: (
         "You are Writer. Produce a structured Connor.ai daily report using selected items, "
-        "evidence maps, watchlist updates, and cautious uncertainty labels."
+        "evidence maps, watchlist updates, and cautious uncertainty labels. Return report_drafts "
+        "with structured sections and items; do not invent unsupported evidence."
     ),
     AgentRole.REVIEWER: (
         "You are Reviewer. Strictly check evidence, uncertainty, why-it-matters, finance impact "
-        "chains, follow-up points, and Markdown/JSON consistency."
+        "chains, follow-up points, and Markdown/JSON consistency. Return review_drafts with "
+        "pass/revise/reopen/reject decisions and actionable issues."
     ),
     AgentRole.EDITOR: (
         "You are Editor. Revise drafts according to reviewer feedback without weakening evidence "
-        "boundaries or converting signals into facts."
+        "boundaries or converting signals into facts. Return revised_report_drafts that preserve "
+        "the original report lineage."
     ),
     AgentRole.SYSTEM: "Internal system role.",
 }
-

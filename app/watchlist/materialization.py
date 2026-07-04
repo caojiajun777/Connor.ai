@@ -665,6 +665,7 @@ class WatchlistOutputMaterializer:
         keys = {
             (
                 item.summary,
+                item.event_at,
                 item.cluster_id,
                 item.watchlist_id,
                 item.archive_id,
@@ -675,6 +676,7 @@ class WatchlistOutputMaterializer:
         for item in updates:
             key = (
                 item.summary,
+                item.event_at,
                 item.cluster_id,
                 item.watchlist_id,
                 item.archive_id,

@@ -72,6 +72,38 @@ def test_daily_run_harness_reraises_unexpected_exceptions_and_records_traceback(
     assert "AttributeError: boom" in error_events[-1].error
 
 
+def test_daily_run_harness_handles_empty_exception_summary(db_session) -> None:
+    import pytest
+
+    from app.domain import TraceEventType
+
+    harness = DailyRunHarness(db_session, config=HarnessConfig(min_selected_items=1))
+    run = harness.create_run(
+        run_id=RUN_ID,
+        report_date=run_state_fixture().report_date,
+        objective=run_state_fixture().objective,
+        budgets=RunBudgets(max_collect_rounds=2),
+    )
+
+    def explode_without_message(*args, **kwargs):
+        raise RuntimeError()
+
+    harness.collect_loop.run = explode_without_message
+
+    with pytest.raises(RuntimeError):
+        harness.run(run)
+
+    failed = RunRepository(db_session).require(RUN_ID)
+    assert failed.status == "failed"
+    assert failed.error_summary == "RuntimeError"
+
+    timeline = TraceService(db_session).reconstruct_timeline(RUN_ID)
+    error_events = [event for event in timeline.events if event.event_type == TraceEventType.ERROR]
+    assert error_events
+    assert "Traceback" in error_events[-1].error
+    assert "RuntimeError" in error_events[-1].error
+
+
 def test_daily_run_harness_refuses_to_resume_failed_run(db_session) -> None:
     import pytest
 

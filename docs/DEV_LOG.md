@@ -840,3 +840,118 @@ Open follow-ups:
 - Materialize Writer, Reviewer, and Editor outputs into report and review records.
 - Generate `full_markdown`, `full_json`, `evidence_map`, `watchlist_updates`, and `trace_timeline`.
 - Ensure Reviewer blocks reports that write early signals as confirmed facts.
+
+### Post-Phase 11 Review Fixes: Harness, Timeout, Trace, Artifact, and Watchlist Hardening
+
+What we did:
+
+- Reviewed the second-round bugfix diff and fixed the remaining issues.
+- Changed trace sequence assignment so the per-run lock covers sequence lookup, trace event creation, repository add, and flush.
+- Moved trace sequence locking to class-level per-run locks so separate `TraceService` instances in the same process share the same lock.
+- Added explicit `asyncio.TimeoutError` handling in `AgentRunner` with non-empty error messages and timeout metadata.
+- Added non-empty fallback error summaries for empty-message exceptions in both `AgentRunner` and `DailyRunHarness`.
+- Fixed Watchlist lifecycle archive dedupe to use `ArchivedSignal.original_cluster_id` instead of metadata.
+- Added regression tests for timeout errors, empty-message failures, trace flush/sequence locking, artifact orphan cleanup, archive cluster fallback dedupe, and thread timeline event-time preservation.
+
+Why:
+
+- The earlier trace TOCTOU fix only locked `max(seq)+1`, not insertion.
+- Timeout exceptions can stringify to an empty string, which can break failed-run validation and hide the real error.
+- Some third-party/runtime exceptions can also stringify to an empty string, so generic exception handling needs the same fallback.
+- Archive dedupe should use the domain lineage field, not optional metadata.
+- The new hardening should be directly tested rather than relying only on existing broad tests.
+
+Files changed:
+
+- `app/agents/runner.py`
+- `app/services/tracing.py`
+- `app/watchlist/lifecycle.py`
+- `tests/agents/test_runner.py`
+- `tests/services/test_tracing.py`
+- `tests/services/test_artifacts.py`
+- `tests/watchlist/test_lifecycle.py`
+- `tests/watchlist/test_materialization.py`
+- `docs/DEV_LOG.md`
+
+Checks:
+
+- `python -m pytest tests\agents\test_runner.py tests\harness\test_daily_run_harness.py -q`: 9 passed.
+- `python -m pytest tests\agents\test_runner.py tests\services\test_tracing.py tests\services\test_artifacts.py tests\watchlist -q`: 20 passed.
+- `python -m pytest -q`: 83 passed.
+- `python -m compileall app tests`: passed.
+- `git diff --check`: passed.
+
+Effect:
+
+- Agent timeout failures now produce usable trace errors and non-empty raised exceptions.
+- Empty-message runtime failures now persist FAILED run/trace state instead of masking the original error.
+- Trace sequence allocation is safer within one process and across multiple `TraceService` instances.
+- Archive dedupe no longer depends on optional metadata.
+- Artifact cleanup and watchlist/thread hardening now have direct regression coverage.
+
+Open follow-ups:
+
+- A future database migration should add a unique constraint on `(run_id, seq)` plus retry for full multi-process trace sequence safety.
+
+### Phase 12: Writing Loop
+
+What we did:
+
+- Added structured writing drafts for Writer, Reviewer, and Editor outputs.
+- Added `app/writing` with `WritingOutputMaterializer` and `WritingTaskFactory`.
+- Integrated writing output materialization into `WritingLoopHarness`.
+- Added `materialize_writing_outputs` harness config.
+- Added report/review/issue ID prefixes to centralized ID generation.
+- Materialized Writer drafts into `DailyReport` records with generated markdown, JSON, evidence maps, watchlist updates, and trace timeline IDs.
+- Materialized Reviewer drafts into `ReviewResult` and `ReviewIssue` records.
+- Materialized Editor revised report drafts back into `DailyReport`.
+- Added a deterministic Reviewer guard that blocks early signals written with confirmed-fact language.
+- Added task contexts so Writer sees selected intelligence, Reviewer sees report/evidence/trace context, and Editor sees report plus latest review issues.
+- Added a writing loop test where the agent runner performs no repository writes; Connor materializes every writing artifact itself.
+- Added Phase 12 plan and ADR 0014.
+
+Why:
+
+- Writing agents should produce structured drafts, not directly mutate persistence.
+- Final reports need the same replayable evidence and trace boundary as collection, clustering, evaluation, and watchlist memory.
+- Markdown and dashboard JSON should come from the same structured report sections.
+- Reviewer must have deterministic backup protection against presenting early signals as confirmed facts.
+
+Files changed:
+
+- `app/agents/outputs.py`
+- `app/agents/__init__.py`
+- `app/agents/prompts.py`
+- `app/core/ids.py`
+- `app/harness/config.py`
+- `app/harness/writing.py`
+- `app/writing/__init__.py`
+- `app/writing/materialization.py`
+- `app/writing/tasks.py`
+- `tests/writing/__init__.py`
+- `tests/writing/test_materialization.py`
+- `tests/harness/test_writing_loop.py`
+- `docs/PROGRESS.md`
+- `docs/plans/phase-12-writing-loop.md`
+- `docs/adr/0014-writing-materialization-boundary.md`
+- `docs/DEV_LOG.md`
+
+Checks:
+
+- `python -m pytest tests\writing\test_materialization.py tests\harness\test_writing_loop.py -q`: 6 passed.
+- `python -m pytest -q`: 88 passed.
+- `python -m compileall app tests`: passed.
+- `git diff --check`: passed.
+
+Effect:
+
+- Connor.ai can now run `Writer -> Reviewer -> Editor -> Reviewer -> Final Report` without agent-side repository writes.
+- `DailyReport` now receives generated `full_markdown`, `full_json`, `evidence_map`, `watchlist_updates`, and `trace_timeline_ids`.
+- `ReviewResult` and `ReviewIssue` are first-class outputs of Reviewer materialization.
+- Early-signal uncertainty has a deterministic quality guard in addition to agent review.
+
+Open follow-ups:
+
+- Start Phase 13: FastAPI and Dashboard Contract.
+- Expose run, report, trace, cluster, watchlist, and thread endpoints.
+- Add dashboard-facing schemas over the structured daily report payload.

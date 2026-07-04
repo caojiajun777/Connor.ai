@@ -137,8 +137,39 @@ class ArtifactService:
         directory = self.artifact_root / safe_run_id
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / f"{safe_artifact_id}{serialized.suffix}"
-        path.write_bytes(serialized.content)
+        # Write to a temp file first, then atomically rename to the final path.
+        # This prevents partially-written files if the process crashes mid-write.
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path.write_bytes(serialized.content)
+        tmp_path.replace(path)
         return path.resolve()
+
+    def cleanup_orphan_artifacts(self) -> int:
+        """Remove artifact files on disk that have no matching database record.
+
+        Returns the number of orphan files removed.
+        """
+        removed = 0
+        if not self.artifact_root.exists():
+            return 0
+        for run_dir in self.artifact_root.iterdir():
+            if not run_dir.is_dir():
+                continue
+            for file_path in run_dir.iterdir():
+                if not file_path.is_file():
+                    continue
+                # Extract the artifact ID from the filename (suffix may be .json, .txt, .bin, or .tmp).
+                artifact_id = file_path.stem
+                if file_path.suffix == ".tmp":
+                    # Temp files are always removable because the write never completed.
+                    file_path.unlink(missing_ok=True)
+                    removed += 1
+                    continue
+                existing = self.repository.get(artifact_id)
+                if existing is None:
+                    file_path.unlink(missing_ok=True)
+                    removed += 1
+        return removed
 
     @staticmethod
     def _serialize_payload(

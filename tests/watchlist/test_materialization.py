@@ -7,8 +7,11 @@ from app.agents.outputs import ArchiveDraft, WatchlistAgentOutput, WatchlistDraf
 from app.domain import (
     AgentRole,
     ArchiveReason,
+    ConfidenceLevel,
+    LaterOutcome,
     PriorityLevel,
     RunPhase,
+    ThreadTimelineEntry,
     TraceEventType,
     WatchTier,
     WatchStatus,
@@ -25,7 +28,7 @@ from app.repositories import (
 )
 from app.services import TraceService
 from app.watchlist.materialization import WatchlistOutputMaterializer
-from tests.domain.fixtures import RUN_ID, early_signal_bundle, run_state_fixture
+from tests.domain.fixtures import BASE_TIME, RUN_ID, early_signal_bundle, run_state_fixture
 
 
 def test_watchlist_draft_creates_watch_item_thread_and_trace(db_session) -> None:
@@ -122,6 +125,21 @@ def test_archive_draft_archives_existing_watch_item(db_session) -> None:
     assert watch.status == WatchStatus.ARCHIVED
     assert TraceEventType.ARCHIVE_CREATED in [event.event_type for event in timeline.events]
     assert TraceEventType.THREAD_UPDATED in [event.event_type for event in timeline.events]
+
+
+def test_thread_timeline_merge_keeps_same_event_with_different_time() -> None:
+    first = ThreadTimelineEntry(
+        event_at=BASE_TIME,
+        summary="Same signal updated.",
+        confidence_at_time=ConfidenceLevel.LOW,
+        later_outcome=LaterOutcome.PENDING,
+        cluster_id="cl_openai_reasoning_api",
+    )
+    second = first.model_copy(update={"event_at": BASE_TIME.replace(hour=13)})
+
+    merged = WatchlistOutputMaterializer._merge_timeline([first], [second])
+
+    assert merged == [first, second]
 
 
 def _persist_early_bundle(db_session, *, include_watch: bool) -> dict[str, object]:

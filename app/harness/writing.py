@@ -22,6 +22,7 @@ from app.harness.decisions import AgentTask, WritingGateDecision, WritingGateOut
 from app.harness.exceptions import HarnessError
 from app.harness.gates import QualityGateService
 from app.repositories import DailyReportRepository
+from app.writing import WritingOutputMaterializer, WritingTaskFactory
 
 
 WRITING_PHASES = {
@@ -44,6 +45,7 @@ class WritingLoopHarness:
         self.context = context
         self.gate_service = gate_service or QualityGateService(context.config)
         self.reports = DailyReportRepository(context.session)
+        self.materializer = WritingOutputMaterializer(context)
 
     def run(
         self,
@@ -164,28 +166,34 @@ class WritingLoopHarness:
             metadata={"task_count": len(tasks), "harness": True},
         )
 
+        tool_call_count = 0
         for task in tasks:
             if task.phase != phase:
                 raise HarnessError(f"task phase {task.phase.value} does not match {phase.value}")
-            self.context.agent_runner.run(
+            result = self.context.agent_runner.run(
                 AgentRunRequest(
                     run_id=run.id,
                     phase=phase,
                     agent_role=task.agent_role,
                     task=task.task,
-                    context={
-                        **task.context,
-                        "run_id": run.id,
-                        "report_date": run.report_date.isoformat(),
-                        "writing_round": run.loop_counters.writing_rounds,
-                        "selected_cluster_ids": run.selected_cluster_ids,
-                    },
+                    context=self._build_task_context(run, phase, task.context),
                 )
             )
+            tool_call_count += len(result.tool_results)
+            if self.context.config.materialize_writing_outputs:
+                self.materializer.materialize(
+                    run=run,
+                    phase=phase,
+                    agent_role=task.agent_role,
+                    result=result,
+                )
 
         latest_run = self.context.runs.require(run.id)
         counters = latest_run.loop_counters.model_copy(
-            update={"model_calls": latest_run.loop_counters.model_calls + len(tasks)}
+            update={
+                "tool_calls": latest_run.loop_counters.tool_calls + tool_call_count,
+                "model_calls": latest_run.loop_counters.model_calls + len(tasks),
+            }
         )
         self.context.runs.add(latest_run.model_copy(update={"loop_counters": counters}))
         self.context.complete_phase(
@@ -193,6 +201,28 @@ class WritingLoopHarness:
             phase=phase,
             summary=f"{phase.value} phase completed.",
         )
+
+    def _build_task_context(
+        self,
+        run: RunState,
+        phase: RunPhase,
+        task_context: dict,
+    ) -> dict:
+        context = {
+            **task_context,
+            "run_id": run.id,
+            "report_date": run.report_date.isoformat(),
+            "writing_round": run.loop_counters.writing_rounds,
+            "selected_cluster_ids": run.selected_cluster_ids,
+        }
+        full_state = self.context.runs.get_full_state(run.id)
+        if phase == RunPhase.WRITING:
+            context["writing_context"] = WritingTaskFactory.writer_context(full_state)
+        if phase in {RunPhase.REVIEWING, RunPhase.FINAL_REVIEW}:
+            context["review_context"] = WritingTaskFactory.reviewer_context(full_state)
+        if phase == RunPhase.EDITING:
+            context["editor_context"] = WritingTaskFactory.editor_context(full_state)
+        return context
 
     def _record_gate_decision(self, run: RunState, decision: WritingGateDecision) -> None:
         self.context.trace_service.record_event(

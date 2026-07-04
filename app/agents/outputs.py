@@ -2,9 +2,9 @@
 
 from typing import Any
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
-from app.domain.base import AwareDatetime, ConnorBaseModel, NonEmptyStr
+from app.domain.base import AwareDatetime, ConnorBaseModel, NonEmptyStr, Score, normalize_unique
 from app.domain.enums import (
     ArchiveReason,
     CandidateCategory,
@@ -278,15 +278,115 @@ class WatchlistAgentOutput(AgentStructuredOutput):
         return self
 
 
+class ReportItemDraft(ConnorBaseModel):
+    """Writer/Editor proposal for one rendered report item."""
+
+    item_id: str | None = None
+    title: NonEmptyStr
+    category: CandidateCategory
+    status_label: NonEmptyStr
+    core_information: NonEmptyStr
+    why_it_matters: NonEmptyStr
+    potential_impact: str | None = None
+    key_data: list[str] = Field(default_factory=list)
+    tickers: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+    cluster_ids: list[str] = Field(default_factory=list)
+    followup_points: list[str] = Field(default_factory=list)
+    uncertainty_label: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("evidence_ids", "cluster_ids", "tickers")
+    @classmethod
+    def values_must_be_unique(cls, value: list[str]) -> list[str]:
+        return normalize_unique(value)
+
+    @model_validator(mode="after")
+    def validate_report_item_draft(self) -> "ReportItemDraft":
+        if not self.evidence_ids:
+            raise ValueError("report item drafts require evidence_ids")
+        if not self.cluster_ids:
+            raise ValueError("report item drafts require cluster_ids")
+        if self.category == CandidateCategory.EARLY_SIGNAL and not self.uncertainty_label:
+            raise ValueError("early-signal report item drafts require uncertainty_label")
+        if self.category == CandidateCategory.TECH_FINANCE and not (
+            self.tickers or self.potential_impact
+        ):
+            raise ValueError("tech-finance report item drafts require tickers or potential_impact")
+        return self
+
+
+class ReportSectionDraft(ConnorBaseModel):
+    """Writer/Editor proposal for one report section."""
+
+    section_id: NonEmptyStr
+    title: NonEmptyStr
+    items: list[ReportItemDraft] = Field(default_factory=list)
+
+
+class ReportDraft(ConnorBaseModel):
+    """Writer/Editor proposal for a DailyReport record."""
+
+    report_id: str | None = None
+    title: NonEmptyStr = "Connor.ai Daily Intelligence"
+    full_markdown: str | None = None
+    sections: list[ReportSectionDraft] = Field(default_factory=list)
+    watchlist_updates: list[dict[str, Any]] = Field(default_factory=list)
+    overview_judgments: list[str] = Field(default_factory=list)
+    tomorrow_focus: list[str] = Field(default_factory=list)
+    quality_score: Score | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_report_draft(self) -> "ReportDraft":
+        if not self.sections:
+            raise ValueError("report drafts require sections")
+        if not any(section.items for section in self.sections):
+            raise ValueError("report drafts require at least one section item")
+        return self
+
+
+class ReviewIssueDraft(ConnorBaseModel):
+    """Reviewer proposal for an actionable review issue."""
+
+    priority: int = Field(ge=0, le=3)
+    title: NonEmptyStr
+    body: NonEmptyStr
+    report_item_id: str | None = None
+    evidence_ids: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ReviewDraft(ConnorBaseModel):
+    """Reviewer proposal for a ReviewResult record."""
+
+    review_result_id: str | None = None
+    report_id: str | None = None
+    decision: ReviewDecision
+    issues: list[ReviewIssueDraft] = Field(default_factory=list)
+    required_changes: list[str] = Field(default_factory=list)
+    reasoning_summary: NonEmptyStr
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_review_draft(self) -> "ReviewDraft":
+        if self.decision == ReviewDecision.PASS and (self.issues or self.required_changes):
+            raise ValueError("pass review drafts cannot include issues or required_changes")
+        if self.decision != ReviewDecision.PASS and not (self.issues or self.required_changes):
+            raise ValueError("non-pass review drafts require issues or required_changes")
+        return self
+
+
 class WriterOutput(AgentStructuredOutput):
     """Structured Writer output."""
 
     markdown_preview: str | None = None
+    report_drafts: list[ReportDraft] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_writer_output(self) -> "WriterOutput":
-        if not self.report_ids:
-            raise ValueError("writer output requires report_ids")
+        if not (self.report_ids or self.report_drafts):
+            raise ValueError("writer output requires report_ids or report_drafts")
         return self
 
 
@@ -296,10 +396,18 @@ class ReviewerOutput(AgentStructuredOutput):
     review_result_ids: list[str] = Field(default_factory=list)
     decision: ReviewDecision
     required_changes: list[str] = Field(default_factory=list)
+    review_drafts: list[ReviewDraft] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_reviewer_output(self) -> "ReviewerOutput":
-        if self.decision != ReviewDecision.PASS and not self.required_changes:
+        draft_changes = [
+            change
+            for draft in self.review_drafts
+            for change in [*draft.required_changes, *[issue.title for issue in draft.issues]]
+        ]
+        if not (self.review_result_ids or self.review_drafts):
+            raise ValueError("reviewer output requires review_result_ids or review_drafts")
+        if self.decision != ReviewDecision.PASS and not (self.required_changes or draft_changes):
             raise ValueError("non-pass reviewer output requires required_changes")
         return self
 
@@ -308,9 +416,10 @@ class EditorOutput(AgentStructuredOutput):
     """Structured Editor output."""
 
     edited_report_ids: list[str] = Field(default_factory=list)
+    revised_report_drafts: list[ReportDraft] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_editor_output(self) -> "EditorOutput":
-        if not self.edited_report_ids:
-            raise ValueError("editor output requires edited_report_ids")
+        if not (self.edited_report_ids or self.revised_report_drafts):
+            raise ValueError("editor output requires edited_report_ids or revised_report_drafts")
         return self

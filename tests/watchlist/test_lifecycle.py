@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from app.domain import ArchiveReason, RunPhase, TraceEventType, WatchStatus, WatchTier
+from app.domain import ArchiveReason, EvaluationDecision, RunPhase, TraceEventType, WatchStatus, WatchTier
 from app.domain.base import utc_now
 from app.harness import HarnessContext
 from app.repositories import (
@@ -80,6 +80,38 @@ def test_expire_due_items_archives_watch_and_updates_thread(db_session) -> None:
     assert any(archive.original_watchlist_id == due_watch.id for archive in archives)
     assert TraceEventType.ARCHIVE_CREATED in [event.event_type for event in timeline.events]
     assert TraceEventType.THREAD_UPDATED in [event.event_type for event in timeline.events]
+
+
+def test_sync_evaluation_memory_uses_archive_cluster_lineage_for_dedupe(db_session) -> None:
+    context = HarnessContext(db_session)
+    run = run_state_fixture()
+    context.runs.add(run)
+    early = early_signal_bundle()
+    EvidenceRepository(db_session).add_many(early["evidence"])
+    CandidateRepository(db_session).add(early["candidate"])
+    EventClusterRepository(db_session).add(early["cluster"])
+    ArchivedSignalRepository(db_session).add(early["archive"])
+    EvaluationRepository(db_session).add(
+        early["evaluation"].model_copy(
+            update={
+                "id": "eval_archive_without_metadata",
+                "decision": EvaluationDecision.ARCHIVE,
+                "total_score": 4.0,
+                "required_followups": [],
+                "metadata": {},
+            }
+        )
+    )
+
+    result = WatchlistLifecycleService(context).sync_evaluation_memory(
+        run=run,
+        phase=RunPhase.WATCHLIST_UPDATE,
+    )
+    archives = ArchivedSignalRepository(db_session).list_by_run(RUN_ID)
+
+    assert result.archive_ids == []
+    assert len(archives) == 1
+    assert archives[0].original_cluster_id == early["cluster"].id
 
 
 def _persist_early_bundle(db_session, *, include_watch: bool) -> dict[str, object]:

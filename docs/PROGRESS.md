@@ -4,9 +4,9 @@ Last updated: 2026-07-04
 
 ## Current Status
 
-Project state: Phase 11 complete. Connor.ai now has cost-aware Watchlist, Archive, and Intelligence Thread memory with AgentScope Watchlist Agent output, deterministic lifecycle fallback, TTL expiration, trace, and tests.
+Project state: Phase 12 complete. Connor.ai now has a real AgentScope-first Writing Loop where Writer, Reviewer, and Editor outputs are materialized into DailyReport, ReviewResult, ReviewIssue, full markdown, dashboard JSON, evidence maps, watchlist updates, and trace-backed final reports.
 
-Next phase: Phase 12, Writing Loop.
+Next phase: Phase 13, FastAPI and Dashboard Contract.
 
 ## Phase Progress
 
@@ -23,7 +23,7 @@ Next phase: Phase 12, Writing Loop.
 | 9 | Clusterer | Complete | ClustererOutput, ClusterOutputMaterializer, dedupe merge, confirmation links, conflict preservation, and closed-loop tests delivered. |
 | 10 | Evaluator Group | Complete | Frontier/Event/Market profiles, evaluation drafts, materialization, trace, and closed-loop test delivered. |
 | 11 | Watchlist + Archive + Intelligence Threads | Complete | Watchlist Agent output, lifecycle service, TTL archive, thread updates, and closed-loop test delivered. |
-| 12 | Writing Loop | Not started | Writer, Reviewer, Editor loop. |
+| 12 | Writing Loop | Complete | Writer/Reviewer/Editor draft materialization, report JSON/markdown/evidence map generation, reviewer uncertainty guard, and closed-loop tests delivered. |
 | 13 | FastAPI and Dashboard Contract | Not started | External API contract. |
 | 14 | Source Expansion | Not started | Real source breadth after core reliability. |
 
@@ -243,17 +243,42 @@ Checks:
 - `python -m pytest -q`: 76 passed.
 - `python -m compileall app tests`: passed.
 
+## Phase 12 Results
+
+Delivered:
+
+- `ReportItemDraft`, `ReportSectionDraft`, `ReportDraft`, `ReviewIssueDraft`, and `ReviewDraft` structured outputs.
+- `WriterOutput`, `ReviewerOutput`, and `EditorOutput` support for materializable drafts while preserving backward compatibility with existing id-based outputs.
+- `app/writing` package with `WritingOutputMaterializer` and `WritingTaskFactory`.
+- Writer draft materialization into `DailyReport` records.
+- Editor revised draft materialization into updated `DailyReport` records.
+- Reviewer draft materialization into `ReviewResult` and `ReviewIssue` records.
+- Automatic `full_markdown` rendering when agents do not provide markdown.
+- Automatic `full_json`, `evidence_map`, `watchlist_updates`, and `trace_timeline_ids` generation.
+- Report trace backfill so materialized reports include the trace event that created or edited them.
+- Deterministic Reviewer guard that converts invalid PASS reviews into REVISE when early signals use confirmed-fact language.
+- Writing-loop context injection for Writer, Reviewer, and Editor tasks.
+- Harness config flag `materialize_writing_outputs`.
+- Centralized ID prefixes for report, review, and issue records.
+- Tests for materialization, uncertainty guard, editor revisions, and a no-side-effect AgentScope-style writing loop.
+
+Checks:
+
+- `python -m pytest tests\writing\test_materialization.py tests\harness\test_writing_loop.py -q`: 6 passed.
+- `python -m pytest -q`: 88 passed.
+- `python -m compileall app tests`: passed.
+- `git diff --check`: passed.
+
 ## Immediate Next Step
 
-Phase 12: Writing Loop.
+Phase 13: FastAPI and Dashboard Contract.
 
 Initial scope:
 
-- Add structured Writer drafts that create `DailyReport` records.
-- Add Reviewer materialization into `ReviewResult` and `ReviewIssue`.
-- Add Editor materialization for revised reports.
-- Generate `full_markdown`, `full_json`, `evidence_map`, `watchlist_updates`, and `trace_timeline`.
-- Enforce that early signals are not written as confirmed facts.
+- Add FastAPI app structure.
+- Expose stable run, report, trace, cluster, watchlist, and thread endpoints.
+- Define Dashboard response schemas without leaking internal chain-of-thought.
+- Add endpoint tests against the current repository/service layer.
 
 ## Definition of Done for Each Phase
 

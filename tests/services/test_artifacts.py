@@ -1,6 +1,7 @@
 """Artifact service tests."""
 
 import hashlib
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -62,6 +63,30 @@ def test_artifact_service_can_store_database_payload(db_session) -> None:
     assert service.read_payload(artifact.id) == {"normalized": True}
 
 
+def test_artifact_service_cleanup_removes_orphan_and_tmp_files(db_session, tmp_path) -> None:
+    RunRepository(db_session).add(run_state_fixture())
+    service = ArtifactService(db_session, artifact_root=tmp_path, inline_max_bytes=4)
+
+    artifact = service.store_payload(
+        run_id="run_2026_07_03",
+        kind=ArtifactKind.RAW_PAGE_SNAPSHOT,
+        payload=b"binary raw snapshot",
+    )
+    db_session.flush()
+    artifact_path = Path(artifact.uri)
+    orphan_path = artifact_path.with_name("orphan_payload.bin")
+    tmp_path_leftover = artifact_path.with_name("unfinished_payload.bin.tmp")
+    orphan_path.write_bytes(b"orphan")
+    tmp_path_leftover.write_bytes(b"unfinished")
+
+    removed = service.cleanup_orphan_artifacts()
+
+    assert removed == 2
+    assert artifact_path.exists()
+    assert not orphan_path.exists()
+    assert not tmp_path_leftover.exists()
+
+
 def test_artifact_service_rejects_hidden_reasoning_keys(db_session) -> None:
     RunRepository(db_session).add(run_state_fixture())
     service = ArtifactService(db_session)
@@ -72,4 +97,3 @@ def test_artifact_service_rejects_hidden_reasoning_keys(db_session) -> None:
             kind=ArtifactKind.MODEL_OUTPUT,
             payload={"chain_of_thought": "do not store"},
         )
-

@@ -105,16 +105,19 @@ class DailyRunHarness:
                     summary="Daily run started; entering collect loop.",
                 )
 
-            if active_run.phase in {
-                RunPhase.INITIALIZE,
-                RunPhase.COLLECT_PLANNING,
-                RunPhase.SCOUTING,
-                RunPhase.CLUSTERING,
-                RunPhase.EVALUATING,
-                RunPhase.EVALUATION_GATE,
-                RunPhase.FOLLOWUP,
-                RunPhase.WATCHLIST_UPDATE,
-            }:
+            if (
+                active_run.phase in {
+                    RunPhase.INITIALIZE,
+                    RunPhase.COLLECT_PLANNING,
+                    RunPhase.SCOUTING,
+                    RunPhase.CLUSTERING,
+                    RunPhase.EVALUATING,
+                    RunPhase.EVALUATION_GATE,
+                    RunPhase.FOLLOWUP,
+                    RunPhase.WATCHLIST_UPDATE,
+                }
+                and active_run.status == RunStatus.RUNNING
+            ):
                 active_run, collect_decisions = self.collect_loop.run(
                     active_run,
                     tasks_by_phase=collect_tasks_by_phase,
@@ -138,9 +141,10 @@ class DailyRunHarness:
             )
         except Exception as exc:
             latest_run = self.context.runs.require(run.id)
+            error_summary = str(exc) or type(exc).__name__
             self.context.fail_run(
                 latest_run,
-                error_summary=str(exc),
+                error_summary=error_summary,
                 error_detail=traceback.format_exc(),
                 phase=latest_run.phase,
             )

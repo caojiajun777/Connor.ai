@@ -108,6 +108,23 @@ class WatchlistLifecycleService:
             for thread in full_state.threads
             if thread.metadata.get("source_evaluation_id")
         }
+        # Fallback: also track which clusters are already covered,
+        # in case the Watchlist Agent created items without source_evaluation_id.
+        watched_cluster_ids = {
+            cluster_id
+            for item in full_state.watchlist
+            for cluster_id in item.cluster_ids
+        }
+        archived_cluster_ids = {
+            archive.original_cluster_id
+            for archive in full_state.archives
+            if archive.original_cluster_id
+        }
+        threaded_cluster_ids = {
+            cluster_id
+            for thread in full_state.threads
+            for cluster_id in thread.linked_cluster_ids
+        }
 
         watchlist_drafts: list[WatchlistDraft] = []
         archive_drafts: list[ArchiveDraft] = []
@@ -116,16 +133,22 @@ class WatchlistLifecycleService:
             cluster = clusters_by_id.get(evaluation.cluster_id)
             if cluster is None:
                 continue
-            if evaluation.decision in WATCH_DECISIONS and evaluation.id not in watched_evaluation_ids:
+            if (
+                evaluation.decision in WATCH_DECISIONS
+                and evaluation.id not in watched_evaluation_ids
+                and evaluation.cluster_id not in watched_cluster_ids
+            ):
                 watchlist_drafts.append(self._watchlist_draft(evaluation, cluster))
             if (
                 evaluation.decision == EvaluationDecision.ARCHIVE
                 and evaluation.id not in archived_evaluation_ids
+                and evaluation.cluster_id not in archived_cluster_ids
             ):
                 archive_drafts.append(self._archive_draft(evaluation, cluster))
             if (
                 evaluation.decision == EvaluationDecision.SELECT_CONFIRMED
                 and evaluation.id not in threaded_evaluation_ids
+                and evaluation.cluster_id not in threaded_cluster_ids
             ):
                 thread_drafts.append(self._confirmed_thread_draft(evaluation, cluster))
 

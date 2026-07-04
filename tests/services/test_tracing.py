@@ -2,7 +2,9 @@
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy import func, select
 
+from app.db.models import TraceEventRecord
 from app.domain import (
     AgentRole,
     ModelCallStatus,
@@ -109,6 +111,25 @@ def test_trace_service_records_error_events(db_session) -> None:
     assert event.error == "Timeout"
 
 
+def test_trace_service_flushes_event_before_releasing_sequence_lock(db_session) -> None:
+    RunRepository(db_session).add(run_state_fixture())
+    trace_service = TraceService(db_session)
+
+    event = trace_service.record_event(
+        run_id="run_2026_07_03",
+        phase=RunPhase.SCOUTING,
+        event_type=TraceEventType.PHASE_STARTED,
+        summary="Scouting phase started.",
+    )
+    persisted_count = db_session.scalar(select(func.count()).select_from(TraceEventRecord))
+
+    assert event.seq == 0
+    assert persisted_count == 1
+    assert TraceService._sequence_lock_for_run("run_2026_07_03") is TraceService._sequence_lock_for_run(
+        "run_2026_07_03"
+    )
+
+
 def test_trace_service_rejects_failed_tool_call_without_error(db_session) -> None:
     RunRepository(db_session).add(run_state_fixture())
     trace_service = TraceService(db_session)
@@ -121,4 +142,3 @@ def test_trace_service_rejects_failed_tool_call_without_error(db_session) -> Non
             tool_name="github_search",
             status=ToolCallStatus.FAILED,
         )
-

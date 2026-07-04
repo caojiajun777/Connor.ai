@@ -49,7 +49,14 @@ class AgentRunner:
         )
 
     def run(self, request: AgentRunRequest) -> AgentRunResult:
-        """Synchronous wrapper for worker/test contexts without an event loop."""
+        """Synchronous wrapper for worker/test contexts without an event loop.
+
+        NOTE: ``asyncio.run()`` must be called from the main thread on some platforms
+        (Python 3.14+ enforces this on Windows). If this method is ever invoked from
+        a worker thread, replace ``asyncio.run()`` with an explicit
+        ``threading.Thread`` + ``new_event_loop()`` pattern, or migrate all callers to
+        ``run_async()`` directly.
+        """
 
         try:
             asyncio.get_running_loop()
@@ -89,7 +96,11 @@ class AgentRunner:
 
         try:
             agent = self._create_agent(config, bridge)
-            response = await agent.reply(self._build_user_message(request, config))
+            coro = agent.reply(self._build_user_message(request, config))
+            if config.execution.timeout_seconds is not None:
+                response = await asyncio.wait_for(coro, timeout=config.execution.timeout_seconds)
+            else:
+                response = await coro
             output_text = self._extract_text(response)
             structured_output = config.output_model.model_validate(
                 self._extract_structured_payload(response, output_text)
@@ -119,7 +130,29 @@ class AgentRunner:
                 start_trace_event=start_event,
                 completion_trace_event=completion_event,
             )
+        except asyncio.TimeoutError as exc:
+            timeout_message = (
+                f"{config.display_name} AgentScope task timed out after "
+                f"{config.execution.timeout_seconds} second(s)."
+            )
+            self.trace_service.record_event(
+                run_id=request.run_id,
+                phase=request.phase,
+                agent_role=request.agent_role,
+                event_type=TraceEventType.ERROR,
+                status=TraceStatus.FAILED,
+                summary=f"{config.display_name} timed out during AgentScope task.",
+                error=timeout_message,
+                metadata={
+                    "exception_type": "TimeoutError",
+                    "agentscope": True,
+                    "timeout_seconds": config.execution.timeout_seconds,
+                },
+            )
+            self.session.flush()
+            raise AgentScopeExecutionError(timeout_message) from exc
         except Exception as exc:
+            error_message = str(exc) or f"{type(exc).__name__} raised during AgentScope task."
             error_event = self.trace_service.record_event(
                 run_id=request.run_id,
                 phase=request.phase,
@@ -127,7 +160,7 @@ class AgentRunner:
                 event_type=TraceEventType.ERROR,
                 status=TraceStatus.FAILED,
                 summary=f"{config.display_name} failed AgentScope task.",
-                error=str(exc),
+                error=error_message,
                 metadata={
                     "exception_type": type(exc).__name__,
                     "agentscope": True,
@@ -138,7 +171,7 @@ class AgentRunner:
                 raise
             if isinstance(exc, AgentScopeExecutionError):
                 raise
-            raise AgentScopeExecutionError(str(exc)) from exc
+            raise AgentScopeExecutionError(error_message) from exc
 
     def _create_agent(
         self,

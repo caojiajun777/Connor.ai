@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable
 from typing import Any
@@ -15,6 +16,7 @@ from pydantic import BaseModel, ValidationError
 from app.agents import (
     AgentRunRequest,
     AgentRunner,
+    AgentScopeExecutionError,
     AgentScopeToolBridge,
     create_default_agent_role_registry,
 )
@@ -70,6 +72,69 @@ class ScriptedAgentScopeModel(ChatModelBase):
         if callable(response):
             return response(messages, tools, len(self.calls))
         return response
+
+
+class SlowAgentScopeModel(ChatModelBase):
+    """AgentScope model that intentionally exceeds the configured timeout."""
+
+    class Parameters(BaseModel):
+        pass
+
+    def __init__(self):
+        super().__init__(
+            credential=CredentialBase(name="test"),
+            model="slow-agentscope-model",
+            parameters=self.Parameters(),
+            stream=False,
+            max_retries=0,
+        )
+
+    async def _call_api(
+        self,
+        model_name: str,
+        messages: list[Msg],
+        tools: list[dict] | None = None,
+        tool_choice: Any | None = None,
+        **kwargs: Any,
+    ) -> ChatResponse:
+        await asyncio.sleep(0.05)
+        return ChatResponse(
+            content=[TextBlock(text=json.dumps({"summary": "Too late"}))],
+            is_last=True,
+        )
+
+
+class EmptyMessageError(Exception):
+    """Exception whose string representation is empty."""
+
+    def __str__(self) -> str:
+        return ""
+
+
+class EmptyFailureAgentScopeModel(ChatModelBase):
+    """AgentScope model that fails with an empty exception message."""
+
+    class Parameters(BaseModel):
+        pass
+
+    def __init__(self):
+        super().__init__(
+            credential=CredentialBase(name="test"),
+            model="empty-failure-agentscope-model",
+            parameters=self.Parameters(),
+            stream=False,
+            max_retries=0,
+        )
+
+    async def _call_api(
+        self,
+        model_name: str,
+        messages: list[Msg],
+        tools: list[dict] | None = None,
+        tool_choice: Any | None = None,
+        **kwargs: Any,
+    ) -> ChatResponse:
+        raise EmptyMessageError()
 
 
 def create_runner(db_session, model: ChatModelBase) -> AgentRunner:
@@ -225,6 +290,53 @@ def test_agent_runner_rejects_invalid_structured_output_and_records_error(db_ses
 
     timeline = TraceService(db_session).reconstruct_timeline(RUN_ID)
     assert timeline.events[-1].event_type == TraceEventType.ERROR
+
+
+def test_agent_runner_timeout_records_non_empty_error(db_session) -> None:
+    RunRepository(db_session).add(run_state_fixture())
+    tool_registry = create_default_tool_registry()
+    role_registry = create_default_agent_role_registry(tool_registry)
+    role_registry.require(AgentRole.SOCIAL_SCOUT).execution.timeout_seconds = 0.001
+    runner = AgentRunner(
+        db_session,
+        role_registry=role_registry,
+        tool_registry=tool_registry,
+        model_factory=lambda _config: SlowAgentScopeModel(),
+    )
+
+    with pytest.raises(AgentScopeExecutionError, match="timed out after"):
+        runner.run(
+            AgentRunRequest(
+                run_id=RUN_ID,
+                phase=RunPhase.SCOUTING,
+                agent_role=AgentRole.SOCIAL_SCOUT,
+                task="Timeout intentionally.",
+            )
+        )
+
+    timeline = TraceService(db_session).reconstruct_timeline(RUN_ID)
+    assert timeline.events[-1].event_type == TraceEventType.ERROR
+    assert timeline.events[-1].error
+    assert "timed out after" in timeline.events[-1].error
+
+
+def test_agent_runner_empty_exception_records_non_empty_error(db_session) -> None:
+    RunRepository(db_session).add(run_state_fixture())
+    runner = create_runner(db_session, EmptyFailureAgentScopeModel())
+
+    with pytest.raises(AgentScopeExecutionError, match="EmptyMessageError"):
+        runner.run(
+            AgentRunRequest(
+                run_id=RUN_ID,
+                phase=RunPhase.SCOUTING,
+                agent_role=AgentRole.SOCIAL_SCOUT,
+                task="Fail with empty exception message.",
+            )
+        )
+
+    timeline = TraceService(db_session).reconstruct_timeline(RUN_ID)
+    assert timeline.events[-1].event_type == TraceEventType.ERROR
+    assert timeline.events[-1].error == "EmptyMessageError raised during AgentScope task."
 
 
 def test_agentscope_tool_bridge_exposes_only_role_allowed_tools(db_session) -> None:

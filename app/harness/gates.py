@@ -194,7 +194,7 @@ class QualityGateService:
             )
 
         if review.decision == ReviewDecision.REVISE:
-            if run.loop_counters.review_rounds <= self.config.max_writing_revisions:
+            if run.loop_counters.review_rounds < self.config.max_writing_revisions:
                 return WritingGateDecision(
                     outcome=WritingGateOutcome.REVISE,
                     reasoning_summary="Reviewer requested revision and revision budget remains.",

@@ -129,6 +129,9 @@ class CollectLoopHarness:
         if len(tasks) > limit:
             raise HarnessError(f"{phase.value} has {len(tasks)} task(s), limit is {limit}")
 
+        if tasks and self.context.agent_runner is None:
+            raise HarnessError(f"{phase.value} tasks require an AgentRunner")
+
         self.context.trace_service.record_event(
             run_id=run.id,
             phase=phase,
@@ -137,9 +140,6 @@ class CollectLoopHarness:
             summary=f"{phase.value} phase started with {len(tasks)} task(s).",
             metadata={"task_count": len(tasks), "harness": True},
         )
-
-        if tasks and self.context.agent_runner is None:
-            raise HarnessError(f"{phase.value} tasks require an AgentRunner")
 
         if phase == RunPhase.WATCHLIST_UPDATE and self.context.config.expire_due_watchlist_items:
             self.watchlist_lifecycle.expire_due_items(run=run, phase=phase)

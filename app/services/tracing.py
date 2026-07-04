@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, ClassVar
 
 from pydantic import BaseModel
 from sqlalchemy import func, select
@@ -94,6 +95,9 @@ class TraceTimeline:
 class TraceService:
     """High-level APIs for writing replayable trace records."""
 
+    _seq_locks_guard: ClassVar[threading.Lock] = threading.Lock()
+    _seq_locks: ClassVar[dict[str, threading.Lock]] = {}
+
     def __init__(
         self,
         session: Session,
@@ -141,28 +145,30 @@ class TraceService:
             payload=output_payload,
             direction="output",
         )
-        event = TraceEvent(
-            id=event_id or self._new_id("trace"),
-            run_id=run_id,
-            parent_id=parent_id,
-            seq=self._next_seq(run_id),
-            phase=phase,
-            agent_role=agent_role,
-            event_type=event_type,
-            status=status,
-            summary=summary,
-            reasoning_summary=reasoning_summary,
-            tool_call_id=tool_call_id,
-            model_call_id=model_call_id,
-            input_artifact_ref=input_ref,
-            output_artifact_ref=output_ref,
-            created_object_refs=self._object_refs(created_objects or []),
-            duration_ms=duration_ms,
-            error=error,
-            metadata=metadata or {},
-            created_at=occurred_at or utc_now(),
-        )
-        self.trace_repository.add(event)
+        with self._sequence_lock_for_run(run_id):
+            event = TraceEvent(
+                id=event_id or self._new_id("trace"),
+                run_id=run_id,
+                parent_id=parent_id,
+                seq=self._next_seq_unlocked(run_id),
+                phase=phase,
+                agent_role=agent_role,
+                event_type=event_type,
+                status=status,
+                summary=summary,
+                reasoning_summary=reasoning_summary,
+                tool_call_id=tool_call_id,
+                model_call_id=model_call_id,
+                input_artifact_ref=input_ref,
+                output_artifact_ref=output_ref,
+                created_object_refs=self._object_refs(created_objects or []),
+                duration_ms=duration_ms,
+                error=error,
+                metadata=metadata or {},
+                created_at=occurred_at or utc_now(),
+            )
+            self.trace_repository.add(event)
+            self.session.flush()
         return event
 
     def phase_started(self, *, run_id: str, phase: RunPhase, summary: str) -> TraceEvent:
@@ -416,11 +422,20 @@ class TraceService:
             payload=payload,
         ).ref
 
-    def _next_seq(self, run_id: str) -> int:
+    def _next_seq_unlocked(self, run_id: str) -> int:
         self.session.flush()
         stmt = select(func.max(TraceEventRecord.seq)).where(TraceEventRecord.run_id == run_id)
         current = self.session.scalar(stmt)
         return 0 if current is None else int(current) + 1
+
+    @classmethod
+    def _sequence_lock_for_run(cls, run_id: str) -> threading.Lock:
+        with cls._seq_locks_guard:
+            lock = cls._seq_locks.get(run_id)
+            if lock is None:
+                lock = threading.Lock()
+                cls._seq_locks[run_id] = lock
+            return lock
 
     @classmethod
     def _object_refs(cls, objects: list[BaseModel | ObjectRef]) -> list[ObjectRef]:

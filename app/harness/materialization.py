@@ -134,7 +134,7 @@ class ScoutOutputMaterializer:
         draft: CandidateDraft,
         available_evidence_ids: list[str],
     ) -> CandidateItem:
-        evidence_ids = draft.evidence_ids or available_evidence_ids
+        evidence_ids = list(draft.evidence_ids) if draft.evidence_ids else list(available_evidence_ids)
         if not evidence_ids and draft.signal_status != SignalStatus.MANUAL_HYPOTHESIS:
             raise HarnessError("Scout candidate draft requires evidence_ids from output or tool results.")
         evidence_items = [self.evidence.require(evidence_id) for evidence_id in evidence_ids]
