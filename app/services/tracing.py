@@ -430,6 +430,12 @@ class TraceService:
 
     @classmethod
     def _sequence_lock_for_run(cls, run_id: str) -> threading.Lock:
+        # NOTE: This lock is per-run and per-process (threading.Lock).
+        # It guarantees sequential trace ordering within a single process,
+        # but does NOT protect against races when multiple workers process
+        # the same run_id concurrently (e.g. horizontal-scale deployments).
+        # For multi-process safety, replace with DB-level locking
+        # (SELECT ... FOR UPDATE) or an atomic counter (PostgreSQL sequence).
         with cls._seq_locks_guard:
             lock = cls._seq_locks.get(run_id)
             if lock is None:

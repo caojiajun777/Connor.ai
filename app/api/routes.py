@@ -67,6 +67,9 @@ def create_daily_run(request: DailyRunCreateRequest, session: SessionDep) -> Run
             status_code=status.HTTP_409_CONFLICT,
             detail="run already exists or violates persistence constraints",
         ) from exc
+    except Exception:
+        session.rollback()
+        raise
     full_state = RunRepository(session).get_full_state(run.id)
     return _run_detail(full_state)
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections import defaultdict
 
 from app.agents.outputs import ArchiveDraft, ThreadDraft, ThreadTimelineDraft, WatchlistDraft
 from app.domain import (
@@ -55,32 +56,46 @@ class WatchlistLifecycleService:
         self.context.session.flush()
         now = utc_now()
         due_items = self.materializer.watchlist.list_active_due(before=now)
-        archive_drafts = [
-            ArchiveDraft(
-                original_watchlist_id=item.id,
-                original_cluster_id=item.cluster_ids[0] if item.cluster_ids else None,
-                thread_id=item.thread_id,
-                archive_reason=ArchiveReason.TTL_EXPIRED,
-                final_state=f"Watch window expired for {item.topic}.",
-                reactivation_hint=(
-                    item.reactivation_rules[0]
-                    if item.reactivation_rules
-                    else "Reactivate if new evidence appears."
-                ),
-                evidence_ids=item.evidence_ids,
-                metadata={"lifecycle": "expire_due_items"},
-            )
-            for item in due_items
-            if item.run_id == run.id
-        ]
-        if not archive_drafts:
+        if not due_items:
             return WatchlistMaterializationResult()
-        return self.materializer.materialize_drafts(
-            run=run,
-            phase=phase,
-            agent_role=AgentRole.SYSTEM,
-            archive_drafts=archive_drafts,
-        )
+
+        result = WatchlistMaterializationResult()
+        drafts_by_run_id: dict[str, list[ArchiveDraft]] = defaultdict(list)
+        for item in due_items:
+            drafts_by_run_id[item.run_id].append(
+                ArchiveDraft(
+                    original_watchlist_id=item.id,
+                    original_cluster_id=item.cluster_ids[0] if item.cluster_ids else None,
+                    thread_id=item.thread_id,
+                    archive_reason=ArchiveReason.TTL_EXPIRED,
+                    final_state=f"Watch window expired for {item.topic}.",
+                    reactivation_hint=(
+                        item.reactivation_rules[0]
+                        if item.reactivation_rules
+                        else "Reactivate if new evidence appears."
+                    ),
+                    evidence_ids=item.evidence_ids,
+                    metadata={
+                        "lifecycle": "expire_due_items",
+                        "maintenance_run_id": run.id,
+                    },
+                )
+            )
+
+        for owner_run_id, archive_drafts in drafts_by_run_id.items():
+            owner_run = self.context.runs.require(owner_run_id)
+            materialized = self.materializer.materialize_drafts(
+                run=owner_run,
+                phase=phase,
+                agent_role=AgentRole.SYSTEM,
+                archive_drafts=archive_drafts,
+            )
+            result.archive_ids.extend(materialized.archive_ids)
+            result.thread_ids.extend(materialized.thread_ids)
+
+        result.archive_ids = self.materializer._dedupe(result.archive_ids)
+        result.thread_ids = self.materializer._dedupe(result.thread_ids)
+        return result
 
     def sync_evaluation_memory(
         self,

@@ -105,6 +105,9 @@ class RunRepository(DomainRepository[RunState, RunRecord]):
             ThreadStatus.ARCHIVED.value,
             ThreadStatus.RESOLVED.value,
         ]
+        # Threads are cross-run entities by design — they connect signals
+        # across multiple daily runs and are not scoped to a single run_id.
+        # The dashboard expects global thread visibility.
         threads = self.threads.list_by_statuses(active_thread_statuses)
         return FullRunState(
             run=run,

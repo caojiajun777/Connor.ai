@@ -49,6 +49,39 @@ def test_collect_gate_requests_followup_when_no_selected_items(db_session) -> No
     assert decision.followup_queries == ["Check official API changelog."]
 
 
+def test_collect_gate_allows_followup_when_collect_round_budget_is_exhausted(db_session) -> None:
+    run = run_state_fixture().model_copy(
+        update={
+            "budgets": RunBudgets(max_collect_rounds=1, max_followup_rounds=2),
+            "loop_counters": run_state_fixture().loop_counters.model_copy(
+                update={"collect_rounds": 1, "followup_rounds": 0}
+            ),
+        }
+    )
+    RunRepository(db_session).add(run)
+    EvaluationRepository(db_session).add(
+        EvaluationResult(
+            id="eval_followup_at_collect_limit",
+            run_id=RUN_ID,
+            cluster_id="cluster_missing",
+            evaluator_type=EvaluationType.FRONTIER,
+            created_by_agent="frontier_evaluator",
+            dimension_scores={"specificity": 5, "trackability": 6},
+            total_score=5.5,
+            decision=EvaluationDecision.FOLLOWUP_NOW,
+            reasoning_summary="Needs targeted follow-up.",
+            required_followups=["Check model card upload history."],
+            created_at=BASE_TIME,
+        )
+    )
+    db_session.flush()
+
+    decision = QualityGateService().evaluate_collect(RunRepository(db_session).get_full_state(RUN_ID))
+
+    assert decision.outcome == CollectGateOutcome.FOLLOWUP_NOW
+    assert decision.followup_queries == ["Check model card upload history."]
+
+
 def test_collect_gate_pauses_when_budget_exhausted_without_selection(db_session) -> None:
     run = RunState(
         id=RUN_ID,

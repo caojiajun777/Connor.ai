@@ -143,6 +143,15 @@ class WatchlistRepository(DomainRepository[WatchlistItem, WatchlistItemRecord]):
         )
         return [self.to_domain(record) for record in self.session.scalars(stmt)]
 
+    def list_active_due_for_run(self, *, before, run_id: str) -> list[WatchlistItem]:
+        """Return active/reactivated items due by *before* for a specific run."""
+        stmt = select(WatchlistItemRecord).where(
+            WatchlistItemRecord.status.in_([WatchStatus.ACTIVE.value, WatchStatus.REACTIVATED.value]),
+            WatchlistItemRecord.watch_until <= before,
+            WatchlistItemRecord.run_id == run_id,
+        )
+        return [self.to_domain(record) for record in self.session.scalars(stmt)]
+
     def list_by_statuses(self, statuses: list[str]) -> list[WatchlistItem]:
         stmt = (
             select(WatchlistItemRecord)

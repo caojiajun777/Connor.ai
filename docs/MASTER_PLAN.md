@@ -406,6 +406,42 @@ Suggested order:
 6. X / Twitter
 7. Paid finance and semiconductor sources
 
+First source-group acceptance:
+
+- GitHub and Hugging Face tools are registered through `ToolRegistry`.
+- Source adapters return `ToolEnvelope` and never write persistence directly.
+- `ToolExecutor` owns evidence persistence, artifacts, trace, and timeout defaults.
+- Expected HTTP/source failures become `ToolError` entries in the envelope.
+- Tests use fake clients rather than live network calls.
+
+Second source-group acceptance:
+
+- arXiv and OpenReview tools are registered through the same `ToolRegistry` boundary.
+- arXiv Atom XML is normalized into the same `ToolEnvelopeItem` contract as JSON sources.
+- OpenReview access challenges become structured tool failures, not untracked runtime crashes.
+- Research-source tests use fake text/JSON clients rather than live network calls.
+
+Third source-group acceptance:
+
+- Official blog and API changelog tools are registered for Official Scout through `ToolRegistry`.
+- Official RSS/Atom feeds are normalized into `ToolEnvelopeItem` records.
+- API changelog pages are parsed into heading-section evidence when no stable feed exists.
+- Official-source tools use curated source keys rather than arbitrary agent-provided URLs.
+
+Fourth source-group acceptance:
+
+- SEC filings and company facts tools are registered for Finance Scout through `ToolRegistry`.
+- Ticker inputs are resolved through SEC's official company ticker map rather than a local hardcoded mapping.
+- SEC filings and XBRL facts are normalized into `ToolEnvelopeItem` records with accession lineage.
+- Investor-relations search uses curated company source keys rather than arbitrary agent-provided URLs.
+
+Fifth source-group acceptance:
+
+- Hacker News feed search is registered for Social Scout through `ToolRegistry`.
+- Hacker News stories are fetched through the official Firebase API with bounded feed and item requests.
+- Community items are normalized into `ToolEnvelopeItem` records with HN thread, external URL, score, comment count, and author metadata.
+- Reddit, X/Twitter, and other authenticated social sources remain outside the tool catalog until credential, rate-limit, and content-policy behavior is explicit.
+
 ## 9. Documentation Rule
 
 Every implementation step must update the project archive:

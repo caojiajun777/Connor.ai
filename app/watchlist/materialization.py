@@ -457,10 +457,22 @@ class WatchlistOutputMaterializer:
                 }
             ),
             timeline=timeline,
-            linked_cluster_ids=draft.linked_cluster_ids,
-            linked_watchlist_ids=draft.linked_watchlist_ids,
-            linked_archive_ids=draft.linked_archive_ids,
-            linked_report_ids=draft.linked_report_ids,
+            linked_cluster_ids=self._dedupe(
+                draft.linked_cluster_ids
+                + [entry.cluster_id for entry in timeline if entry.cluster_id]
+            ),
+            linked_watchlist_ids=self._dedupe(
+                draft.linked_watchlist_ids
+                + [entry.watchlist_id for entry in timeline if entry.watchlist_id]
+            ),
+            linked_archive_ids=self._dedupe(
+                draft.linked_archive_ids
+                + [entry.archive_id for entry in timeline if entry.archive_id]
+            ),
+            linked_report_ids=self._dedupe(
+                draft.linked_report_ids
+                + [entry.report_id for entry in timeline if entry.report_id]
+            ),
         )
 
     def _lineage_from_watch_draft(

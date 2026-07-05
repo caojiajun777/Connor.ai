@@ -54,7 +54,7 @@ class AgentScopeToolBridge:
                     self._create_connor_tool(spec.name),
                     name=spec.name,
                     description=spec.description,
-                    is_concurrency_safe=True,
+                    is_concurrency_safe=False,
                     is_read_only=False,
                 )
             )

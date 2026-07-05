@@ -1,6 +1,9 @@
 """Agent role registry tests."""
 
+import asyncio
+
 from app.agents import (
+    AgentScopeToolBridge,
     ClustererOutput,
     EvaluatorOutput,
     ScoutOutput,
@@ -8,8 +11,9 @@ from app.agents import (
     WriterOutput,
     create_default_agent_role_registry,
 )
-from app.domain import AgentRole
-from app.tools import create_default_tool_registry
+from app.domain import AgentRole, RunPhase
+from app.tools import ToolExecutor, create_default_tool_registry
+from tests.domain.fixtures import RUN_ID
 
 
 def test_default_agent_role_registry_binds_output_models_and_tools() -> None:
@@ -34,3 +38,20 @@ def test_default_agent_role_registry_binds_output_models_and_tools() -> None:
     assert "manual_seed" in social_config.allowed_tool_names
     assert "mock_search" in frontier_config.allowed_tool_names
     assert "manual_seed" not in writer_config.allowed_tool_names
+
+
+def test_agentscope_bridge_marks_connor_tools_sequential(db_session) -> None:
+    tool_registry = create_default_tool_registry()
+    bridge = AgentScopeToolBridge(
+        tool_registry=tool_registry,
+        tool_executor=ToolExecutor(db_session, registry=tool_registry),
+        run_id=RUN_ID,
+        phase=RunPhase.SCOUTING,
+        agent_role=AgentRole.SOCIAL_SCOUT,
+    )
+
+    toolkit = bridge.create_toolkit(["manual_seed"])
+    tool = asyncio.run(toolkit.get_tool("manual_seed"))
+
+    assert tool is not None
+    assert tool.is_concurrency_safe is False

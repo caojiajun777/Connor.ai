@@ -49,36 +49,39 @@ class ToolExecutor:
 
         registered = self.registry.require_allowed(tool_name, context.agent_role)
         spec = registered.spec
+        effective_context = self._context_with_spec_defaults(context, spec)
         started_at = utc_now()
         start = time.perf_counter()
 
         try:
-            raw_result = registered.func(context)
+            raw_result = registered.func(effective_context)
             envelope = self._validate_envelope(spec, raw_result)
             status = self._status_for_envelope(envelope)
             error = self._error_summary(envelope) if status != ToolCallStatus.SUCCEEDED else None
+            partial_failure = bool(envelope.errors and envelope.items)
         except Exception as exc:
-            envelope = self._error_envelope(spec, context, exc)
+            envelope = self._error_envelope(spec, effective_context, exc)
             status = ToolCallStatus.FAILED
-            error = str(exc)
+            error = str(exc) or type(exc).__name__
+            partial_failure = False
 
         ended_at = utc_now()
         duration_ms = int((time.perf_counter() - start) * 1000)
         response_payload = envelope.model_dump(mode="json")
 
         tool_call, trace_event = self.trace_service.record_tool_call(
-            run_id=context.run_id,
-            phase=context.phase,
-            agent_role=context.agent_role,
+            run_id=effective_context.run_id,
+            phase=effective_context.phase,
+            agent_role=effective_context.agent_role,
             tool_name=spec.name,
             source_type=spec.source_type,
-            query=context.query,
+            query=effective_context.query,
             status=status,
             request_payload={
                 "tool_name": spec.name,
-                "query": context.query,
-                "params": context.params,
-                "agent_role": context.agent_role.value,
+                "query": effective_context.query,
+                "params": effective_context.params,
+                "agent_role": effective_context.agent_role.value,
             },
             response_payload=response_payload,
             started_at=started_at,
@@ -89,6 +92,7 @@ class ToolExecutor:
                 "source_type": spec.source_type.value,
                 "item_count": len(envelope.items),
                 "error_count": len(envelope.errors),
+                "partial_failure": partial_failure,
             },
         )
 
@@ -97,13 +101,13 @@ class ToolExecutor:
                 update={"raw_artifact_ref": tool_call.response_artifact_ref}
             )
 
-        evidence_items = self._persist_evidence(spec, context, envelope)
+        evidence_items = self._persist_evidence(spec, effective_context, envelope)
         evidence_trace_event = None
         if evidence_items:
             evidence_trace_event = self.trace_service.record_event(
-                run_id=context.run_id,
-                phase=context.phase,
-                agent_role=context.agent_role,
+                run_id=effective_context.run_id,
+                phase=effective_context.phase,
+                agent_role=effective_context.agent_role,
                 event_type=TraceEventType.EVIDENCE_CREATED,
                 summary=f"Tool {spec.name} created {len(evidence_items)} evidence item(s).",
                 created_objects=evidence_items,
@@ -173,11 +177,39 @@ class ToolExecutor:
             errors=[
                 ToolError(
                     code=error_code,
-                    message=str(exc),
+                    message=str(exc) or type(exc).__name__,
                     retryable=False,
                 )
             ],
             metadata={"exception_type": type(exc).__name__},
+        )
+
+    @staticmethod
+    def _context_with_spec_defaults(
+        context: ToolExecutionContext,
+        spec: ToolSpec,
+    ) -> ToolExecutionContext:
+        if spec.timeout_seconds is None:
+            return context
+        raw_timeout = context.params.get("timeout_seconds")
+        if raw_timeout is None:
+            timeout_seconds = spec.timeout_seconds
+        else:
+            try:
+                timeout_seconds = int(raw_timeout)
+            except (TypeError, ValueError):
+                timeout_seconds = spec.timeout_seconds
+            if timeout_seconds <= 0:
+                timeout_seconds = spec.timeout_seconds
+
+        if timeout_seconds == raw_timeout:
+            return context
+        return ToolExecutionContext(
+            run_id=context.run_id,
+            phase=context.phase,
+            agent_role=context.agent_role,
+            query=context.query,
+            params={**context.params, "timeout_seconds": timeout_seconds},
         )
 
     @staticmethod

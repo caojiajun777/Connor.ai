@@ -98,6 +98,19 @@ class WritingLoopHarness:
             run = self._apply_decision(run, decision)
 
             if decision.outcome == WritingGateOutcome.REVISE:
+                if run.loop_counters.writing_rounds >= run.budgets.max_writing_rounds:
+                    exhausted = WritingGateDecision(
+                        outcome=WritingGateOutcome.NEEDS_MANUAL_REVIEW
+                        if self.context.config.manual_review_on_failure
+                        else WritingGateOutcome.FAIL,
+                        reasoning_summary="Writing budget exhausted mid-round before revision could complete.",
+                        risk_flags=["writing_budget_exhausted"],
+                        metrics={"writing_rounds": run.loop_counters.writing_rounds},
+                    )
+                    self._record_gate_decision(run, exhausted)
+                    run = self._apply_decision(run, exhausted)
+                    decisions.append(exhausted)
+                    return run, decisions
                 self._execute_phase_tasks(run, RunPhase.EDITING, tasks_by_phase)
                 review_phase = (
                     RunPhase.FINAL_REVIEW
@@ -116,6 +129,23 @@ class WritingLoopHarness:
                 return run, decisions
 
             if decision.outcome == WritingGateOutcome.REVIEW_DRAFT:
+                review_tasks = tasks_by_phase.get(RunPhase.REVIEWING, [])
+                if not review_tasks:
+                    no_reviewer = WritingGateDecision(
+                        outcome=WritingGateOutcome.NEEDS_MANUAL_REVIEW
+                        if self.context.config.manual_review_on_failure
+                        else WritingGateOutcome.FAIL,
+                        reasoning_summary=(
+                            "Gate returned REVIEW_DRAFT but no review tasks are configured. "
+                            "Add a reviewer task or enable manual review."
+                        ),
+                        risk_flags=["missing_review_tasks"],
+                        metrics={"writing_rounds": run.loop_counters.writing_rounds},
+                    )
+                    self._record_gate_decision(run, no_reviewer)
+                    run = self._apply_decision(run, no_reviewer)
+                    decisions.append(no_reviewer)
+                    return run, decisions
                 self._execute_phase_tasks(run, RunPhase.REVIEWING, tasks_by_phase)
 
     def _start_writing_round(self, run: RunState) -> RunState:

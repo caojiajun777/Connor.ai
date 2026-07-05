@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import date, timedelta
 
 from app.domain import ArchiveReason, EvaluationDecision, RunPhase, TraceEventType, WatchStatus, WatchTier
 from app.domain.base import utc_now
@@ -82,6 +82,43 @@ def test_expire_due_items_archives_watch_and_updates_thread(db_session) -> None:
     assert TraceEventType.THREAD_UPDATED in [event.event_type for event in timeline.events]
 
 
+def test_expire_due_items_cleans_due_watch_from_previous_run(db_session) -> None:
+    context = HarnessContext(db_session)
+    current_run = run_state_fixture()
+    previous_run = run_state_fixture().model_copy(
+        update={"id": "run_2026_07_02", "report_date": date(2026, 7, 2)}
+    )
+    context.runs.add(current_run)
+    context.runs.add(previous_run)
+
+    previous = _persist_early_bundle_for_run(db_session, previous_run.id, include_watch=True)
+    db_session.flush()
+    now = utc_now()
+    due_watch = previous["watch"].model_copy(
+        update={
+            "created_at": now - timedelta(days=3),
+            "watch_until": now - timedelta(hours=1),
+            "status": WatchStatus.ACTIVE,
+        }
+    )
+    WatchlistRepository(db_session).add(due_watch)
+
+    result = WatchlistLifecycleService(context).expire_due_items(
+        run=current_run,
+        phase=RunPhase.WATCHLIST_UPDATE,
+    )
+
+    expired_watch = WatchlistRepository(db_session).require(due_watch.id)
+    previous_archives = ArchivedSignalRepository(db_session).list_by_run(previous_run.id)
+    current_archives = ArchivedSignalRepository(db_session).list_by_run(current_run.id)
+
+    assert result.archive_ids
+    assert expired_watch.status == WatchStatus.EXPIRED
+    assert previous_archives[0].run_id == previous_run.id
+    assert previous_archives[0].metadata["maintenance_run_id"] == current_run.id
+    assert current_archives == []
+
+
 def test_sync_evaluation_memory_uses_archive_cluster_lineage_for_dedupe(db_session) -> None:
     context = HarnessContext(db_session)
     run = run_state_fixture()
@@ -125,3 +162,31 @@ def _persist_early_bundle(db_session, *, include_watch: bool) -> dict[str, objec
         ArchivedSignalRepository(db_session).add(bundle["archive"])
         IntelligenceThreadRepository(db_session).add(bundle["thread"])
     return bundle
+
+
+def _persist_early_bundle_for_run(db_session, run_id: str, *, include_watch: bool) -> dict[str, object]:
+    bundle = early_signal_bundle()
+    evidence = [item.model_copy(update={"run_id": run_id}) for item in bundle["evidence"]]
+    candidate = bundle["candidate"].model_copy(update={"run_id": run_id})
+    cluster = bundle["cluster"].model_copy(update={"run_id": run_id})
+    evaluation = bundle["evaluation"].model_copy(update={"run_id": run_id})
+    watch = bundle["watch"].model_copy(update={"run_id": run_id})
+    archive = bundle["archive"].model_copy(update={"run_id": run_id})
+
+    EvidenceRepository(db_session).add_many(evidence)
+    CandidateRepository(db_session).add(candidate)
+    EventClusterRepository(db_session).add(cluster)
+    EvaluationRepository(db_session).add(evaluation)
+    if include_watch:
+        WatchlistRepository(db_session).add(watch)
+        IntelligenceThreadRepository(db_session).add(bundle["thread"])
+
+    return {
+        **bundle,
+        "evidence": evidence,
+        "candidate": candidate,
+        "cluster": cluster,
+        "evaluation": evaluation,
+        "watch": watch,
+        "archive": archive,
+    }

@@ -1,12 +1,12 @@
 # Connor.ai Progress Tracker
 
-Last updated: 2026-07-04
+Last updated: 2026-07-05
 
 ## Current Status
 
-Project state: Phase 13 complete. Connor.ai now exposes a FastAPI dashboard contract for runs, reports, trace timelines, clusters, watchlist items, and intelligence threads.
+Project state: Phase 14 in progress. Connor.ai now has five real public source groups wired through ToolExecutor, evidence persistence, artifacts, and trace: GitHub / Hugging Face for code and model signals, arXiv / OpenReview for research signals, official feed / API changelog tools for confirmed first-party updates, SEC / investor-relations tools for finance signals, and Hacker News for community signals.
 
-Next phase: Phase 14, Source Expansion.
+Next phase work: continue Phase 14 source expansion with Reddit / X / other social-source tools after rate-limit, authentication, and content-policy boundaries are explicit.
 
 ## Phase Progress
 
@@ -25,7 +25,7 @@ Next phase: Phase 14, Source Expansion.
 | 11 | Watchlist + Archive + Intelligence Threads | Complete | Watchlist Agent output, lifecycle service, TTL archive, thread updates, and closed-loop test delivered. |
 | 12 | Writing Loop | Complete | Writer/Reviewer/Editor draft materialization, report JSON/markdown/evidence map generation, reviewer uncertainty guard, and closed-loop tests delivered. |
 | 13 | FastAPI and Dashboard Contract | Complete | FastAPI app, dashboard response schemas, run/report/trace/cluster/watchlist/thread endpoints, and API tests delivered. |
-| 14 | Source Expansion | Not started | Real source breadth after core reliability. |
+| 14 | Source Expansion | In progress | GitHub / Hugging Face, arXiv / OpenReview, official blog / API changelog, SEC / IR, and Hacker News source tools complete; Reddit / X social boundaries next. |
 
 ## Phase 1 Results
 
@@ -294,15 +294,49 @@ Checks:
 - `python -m compileall app tests`: passed.
 - `git diff --check`: passed.
 
+## Phase 14 Results
+
+Delivered:
+
+- Optional settings for `CONNOR_GITHUB_TOKEN`, `CONNOR_HUGGINGFACE_TOKEN`, and `CONNOR_TOOL_USER_AGENT`.
+- Minimal HTTP helper for JSON and text public source responses.
+- GitHub repository search tool.
+- GitHub code search tool.
+- Hugging Face model search tool.
+- Hugging Face dataset search tool.
+- arXiv paper search tool with Atom response normalization.
+- OpenReview note search tool with documented API 2 filters and challenge-safe error handling.
+- Official RSS/Atom feed search tool with curated source catalog.
+- API changelog search tool with curated feed/page catalog and HTML heading-section normalization.
+- SEC recent company filings tool with ticker-to-CIK resolution.
+- SEC XBRL company facts tool with bounded concept/form/unit extraction.
+- Investor-relations page search tool with curated company catalog.
+- Hacker News official API feed search tool for bounded community-source collection.
+- Default registry wiring for Code & Model Scout, Research Scout, Official Scout where appropriate, and Orchestrator.
+- Source tool exports from `app.tools`.
+- `ToolExecutor` timeout default injection from `ToolSpec.timeout_seconds`.
+- Source normalization tests with fake JSON/text clients.
+- Executor integration test proving source evidence and trace persistence.
+- Phase 14 plan and ADR 0016.
+
+Checks:
+
+- `python -m pytest tests\tools\test_source_tools.py -q`: 28 passed.
+- `python -m pytest tests\tools tests\agents\test_registry.py tests\agents\test_runner.py -q`: 42 passed.
+- `python -m pytest tests\scouts\test_profiles.py tests\harness\test_all_scouts_closed_loop.py -q`: 6 passed.
+- `python -m pytest -q`: 122 passed.
+- `python -m compileall app tests`: passed.
+- `git diff --check`: passed.
+
 ## Immediate Next Step
 
-Phase 14: Source Expansion.
+Continue Phase 14: Reddit / X / social-source boundaries.
 
 Initial scope:
 
-- Add real source connectors in a controlled order.
-- Start with GitHub / Hugging Face because they fit current evidence and code/model scout contracts.
-- Preserve the same tool envelope, evidence, artifact, and trace boundaries.
+- Add authenticated community-source tools through the same public source boundary after rate-limit, authentication, and content-policy behavior is explicit.
+- Preserve the same tool envelope, evidence, artifact, and trace contracts.
+- Keep live network calls out of tests by injecting fake clients.
 
 ## Definition of Done for Each Phase
 

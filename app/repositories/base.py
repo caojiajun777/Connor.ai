@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from typing import Any, Generic, TypeVar
 
@@ -11,6 +12,8 @@ from sqlalchemy.orm import Session
 
 DomainT = TypeVar("DomainT", bound=BaseModel)
 RecordT = TypeVar("RecordT")
+
+_logger = logging.getLogger(__name__)
 
 
 def enum_value(value: Any) -> Any:
@@ -36,7 +39,20 @@ class DomainRepository(Generic[DomainT, RecordT]):
 
     def add(self, obj: DomainT) -> DomainT:
         record = self.to_record(obj)
-        self.session.merge(record)
+        existing = self.session.get(self.record_model, obj.id)
+        if existing is not None:
+            existing_payload = getattr(existing, "payload", None)
+            new_payload = getattr(record, "payload", None)
+            if existing_payload != new_payload:
+                _logger.warning(
+                    "Merging %s id=%s — existing payload differs from new payload. "
+                    "This may indicate an accidental id collision or a legitimate upsert.",
+                    self.record_model.__name__,
+                    obj.id,
+                )
+            self.session.merge(record)
+        else:
+            self.session.add(record)
         return obj
 
     def add_many(self, objects: Sequence[DomainT]) -> list[DomainT]:

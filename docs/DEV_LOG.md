@@ -1017,3 +1017,331 @@ Effect:
 Open follow-ups:
 
 - Start Phase 14: real source expansion, beginning with GitHub / Hugging Face.
+
+### Phase 14: Source Expansion, GitHub and Hugging Face Tools
+
+What we did:
+
+- Added optional source credentials and user-agent configuration.
+- Added a small JSON HTTP helper for public source tools.
+- Added GitHub repository search and code search tools.
+- Added Hugging Face model and dataset search tools.
+- Registered the tools in the default `ToolRegistry` with role permissions and timeout defaults.
+- Exported the source tools from `app.tools`.
+- Updated `ToolExecutor` so `ToolSpec.timeout_seconds` becomes an effective execution-context default.
+- Added tests that normalize fake GitHub and Hugging Face responses into `ToolEnvelopeItem` records.
+- Added an executor test proving source tool output creates evidence and trace records.
+- Added Phase 14 plan and ADR 0016.
+
+Why:
+
+- Connor.ai needs real source collection, but every source result must still pass through the existing evidence and trace boundary.
+- GitHub and Hugging Face are the first source group because they are structured, public, and directly relevant to Code & Model Scout and Research Scout work.
+- Source adapters should not own persistence, artifacts, or trace construction.
+
+Files changed:
+
+- `README.md`
+- `app/config.py`
+- `app/tools/__init__.py`
+- `app/tools/builtin.py`
+- `app/tools/executor.py`
+- `app/tools/http.py`
+- `app/tools/source_tools.py`
+- `tests/tools/test_source_tools.py`
+- `docs/MASTER_PLAN.md`
+- `docs/PROGRESS.md`
+- `docs/plans/phase-14-source-expansion.md`
+- `docs/adr/0016-public-source-tool-boundary.md`
+- `docs/DEV_LOG.md`
+
+Checks:
+
+- `python -m pytest tests\tools\test_source_tools.py -q`: 10 passed.
+- `python -m pytest tests\tools tests\agents\test_registry.py tests\agents\test_runner.py -q`: 24 passed.
+- `python -m pytest tests\watchlist\test_lifecycle.py tests\harness\test_quality_gates.py -q`: 8 passed.
+- `python -m pytest -q`: 104 passed.
+- `python -m compileall app tests`: passed.
+- `git diff --check`: passed.
+
+Effect:
+
+- AgentScope agents can now call real GitHub and Hugging Face source tools through Connor's `FunctionTool -> ToolExecutor -> ToolEnvelope -> EvidenceItem -> TraceEvent` path.
+- Expected HTTP failures become structured tool errors instead of untraceable missing data.
+- Source tool tests do not depend on live network access.
+
+Open follow-ups:
+
+- Continue Phase 14 with arXiv and OpenReview.
+- Add official blog/API changelog source tools.
+- Add SEC/IR/earnings sources after finance-source boundaries are explicit.
+
+### Post-Review Bugfixes: Source Tools, Watchlist Lifecycle, Trace Locks, and Followup Gates
+
+What we did:
+
+- Fixed watchlist TTL expiration so a current maintenance run can expire due active/reactivated watch items from previous runs.
+- Preserved watch/archive ownership by grouping due watch items by their original `run_id` and materializing archives against that owner run.
+- Removed unsafe per-run trace lock deletion at the end of `DailyRunHarness.run()`.
+- Changed AgentScope Connor tools to `is_concurrency_safe=False` because they share a SQLAlchemy session and write trace/evidence/artifact records.
+- Treated `timeout_seconds=None` as missing so `ToolSpec.timeout_seconds` is still injected.
+- Added GitHub `items` payload shape validation so malformed source responses become structured `unexpected_payload` errors.
+- Completed followup-budget semantics so targeted followup can still run when collect rounds are exhausted but followup budget remains.
+- Added regression tests for cross-run watch expiration, null timeout defaulting, GitHub malformed `items`, sequential AgentScope tools, and followup-at-collect-limit behavior.
+
+Why:
+
+- Long-running Connor.ai deployments must not let historical watchlist items remain active forever.
+- Trace sequence protection should not be invalidated by deleting a lock while another same-run execution may still be active.
+- Real source tools must have bounded network calls even when an agent passes malformed params.
+- AgentScope concurrency metadata must match Connor's database side effects.
+- Followup rounds were documented as independent from collect rounds, but the gate still enforced collect budget.
+
+Files changed:
+
+- `app/agents/agentscope_tools.py`
+- `app/harness/collect.py`
+- `app/harness/gates.py`
+- `app/harness/runner.py`
+- `app/services/tracing.py`
+- `app/tools/executor.py`
+- `app/tools/source_tools.py`
+- `app/watchlist/lifecycle.py`
+- `tests/agents/test_registry.py`
+- `tests/harness/test_quality_gates.py`
+- `tests/tools/test_source_tools.py`
+- `tests/watchlist/test_lifecycle.py`
+- `docs/PROGRESS.md`
+- `docs/plans/phase-14-source-expansion.md`
+- `docs/DEV_LOG.md`
+
+Checks:
+
+- `python -m pytest tests\watchlist\test_lifecycle.py -q`: 4 passed.
+- `python -m pytest tests\tools\test_source_tools.py tests\tools\test_executor.py -q`: 14 passed.
+- `python -m pytest tests\agents\test_registry.py tests\agents\test_runner.py -q`: 7 passed.
+- `python -m pytest tests\harness -q`: 18 passed.
+- `python -m pytest tests\tools tests\agents\test_registry.py tests\agents\test_runner.py -q`: 24 passed.
+- `python -m pytest tests\watchlist\test_lifecycle.py tests\harness\test_quality_gates.py -q`: 8 passed.
+- `python -m pytest -q`: 104 passed.
+- `python -m compileall app tests`: passed.
+- `git diff --check`: passed.
+
+Effect:
+
+- Active watchlist cleanup now works across historical runs.
+- Trace lock protection remains stable for a run within the process lifetime.
+- Source tool timeout and malformed-payload behavior is safer.
+- AgentScope will schedule Connor tools sequentially.
+- Followup loops now match the intended independent-budget model.
+
+Open follow-ups:
+
+- Add a database-level `(run_id, seq)` uniqueness constraint and retry loop for multi-process trace safety.
+- Consider a dedicated maintenance trace event on the current run when it expires watch items owned by previous runs.
+
+### Phase 14: arXiv and OpenReview Source Tools
+
+What we did:
+
+- Added text-response support to the shared public-source HTTP helper.
+- Added `arxiv_search` as a registered source tool that calls the arXiv API, parses Atom XML, and normalizes papers into `ToolEnvelopeItem` records.
+- Added `openreview_note_search` as a registered source tool that calls the OpenReview API 2 `/notes` endpoint with bounded note filters.
+- Registered both tools for Orchestrator, Code & Model Scout, and Research Scout through the default `ToolRegistry`.
+- Exported the tools from `app.tools`.
+- Added fake-client tests for arXiv Atom normalization, OpenReview note normalization, malformed arXiv XML handling, and default registry exposure.
+- Updated the Phase 14 source-expansion plan and progress tracker.
+
+Why:
+
+- Connor.ai needs research-source signals to sit behind the same audited tool, evidence, artifact, and trace path as code/model signals.
+- arXiv and OpenReview are structured enough to add now without weakening the source boundary.
+- OpenReview anonymous live access can return a challenge response, so the tool records that as a structured source failure instead of trying to bypass access controls.
+
+Files changed:
+
+- `app/tools/http.py`
+- `app/tools/source_tools.py`
+- `app/tools/builtin.py`
+- `app/tools/__init__.py`
+- `tests/tools/test_source_tools.py`
+- `docs/PROGRESS.md`
+- `docs/plans/phase-14-source-expansion.md`
+- `docs/DEV_LOG.md`
+
+Checks:
+
+- `python -m pytest tests\tools\test_source_tools.py -q`: 14 passed.
+- `python -m pytest tests\tools tests\agents\test_registry.py tests\agents\test_runner.py -q`: 28 passed.
+- `python -m pytest -q`: 108 passed.
+- `python -m compileall app tests`: passed.
+- `git diff --check`: passed.
+
+Effect:
+
+- Research Scout can now collect arXiv and OpenReview research evidence through Connor's existing `FunctionTool -> ToolExecutor -> ToolEnvelope -> EvidenceItem -> TraceEvent` path.
+- Malformed XML and source access errors remain traceable tool outcomes instead of unstructured exceptions.
+
+Open follow-ups:
+
+- Add official blog/API changelog source tools.
+- Decide whether OpenReview authenticated access belongs in Phase 14 or a later credential-management phase.
+
+### Phase 14: Official Feed and API Changelog Source Tools
+
+What we did:
+
+- Added `official_feed_search` for curated official RSS/Atom blog feeds.
+- Added `api_changelog_search` for curated official API changelog feeds/pages.
+- Registered both tools for Orchestrator and Official Scout through the default `ToolRegistry`.
+- Kept source selection on audited `source_key` / `source_keys` values rather than arbitrary URLs.
+- Added RSS and Atom feed normalization into `ToolEnvelopeItem`.
+- Added HTML changelog page parsing into heading-section evidence for sources without stable feeds.
+- Added HTML snippet cleanup so evidence snippets do not retain raw markup.
+- Added regression tests for RSS normalization, HTML changelog normalization, unknown source keys, malformed XML, and Official Scout registry exposure.
+- Updated Phase 14 plan, progress tracker, master plan, and ADR 0016.
+
+Why:
+
+- Confirmed first-party updates are a different trust category from code/model/research signals and should be available to Official Scout with official evidence strength.
+- Agent freedom should happen inside an audited source catalog, not through arbitrary URL fetching.
+- Some official API changelogs are pages rather than feeds, so the source layer needs a conservative page-section fallback while preserving traceability.
+
+Files changed:
+
+- `app/tools/source_tools.py`
+- `app/tools/builtin.py`
+- `app/tools/__init__.py`
+- `tests/tools/test_source_tools.py`
+- `docs/PROGRESS.md`
+- `docs/MASTER_PLAN.md`
+- `docs/plans/phase-14-source-expansion.md`
+- `docs/adr/0016-public-source-tool-boundary.md`
+- `docs/DEV_LOG.md`
+
+Checks:
+
+- `python -m pytest tests\tools\test_source_tools.py -q`: 19 passed.
+- `python -m pytest tests\tools tests\agents\test_registry.py tests\agents\test_runner.py -q`: 33 passed.
+- `python -m pytest tests\scouts\test_profiles.py tests\harness\test_all_scouts_closed_loop.py -q`: 6 passed.
+- `python -m pytest -q`: 113 passed.
+- `python -m compileall app tests`: passed.
+- `git diff --check`: passed.
+
+Effect:
+
+- Official Scout can now collect first-party blog and API changelog evidence through Connor's existing `FunctionTool -> ToolExecutor -> ToolEnvelope -> EvidenceItem -> TraceEvent` path.
+- Official-source tools return available catalog keys in metadata so agents can choose sources without being able to fetch arbitrary URLs.
+- Malformed official feeds and unknown source keys become traceable `ToolError` entries.
+
+Open follow-ups:
+
+- SEC / IR / earnings-source tools are completed in the following log section.
+- Consider moving source catalogs into database/config once Dashboard source management exists.
+
+### Phase 14: SEC and Investor Relations Source Tools
+
+What we did:
+
+- Added `CONNOR_SEC_USER_AGENT` so SEC requests can use a dedicated fair-access User-Agent.
+- Added `sec_company_filings` for recent SEC EDGAR submissions by ticker or CIK.
+- Added `sec_company_facts` for selected SEC XBRL company facts by ticker or CIK.
+- Added `investor_relations_search` for curated company investor-relations pages.
+- Resolved tickers through SEC's official `company_tickers.json` map instead of a local hardcoded mapping.
+- Normalized SEC filing rows into `ToolEnvelopeItem` records with CIK, ticker, form, accession number, filing date, and archive URL metadata.
+- Normalized SEC XBRL fact rows into `ToolEnvelopeItem` records with taxonomy, concept, unit, value, filing, and accession lineage.
+- Registered the finance tools for Orchestrator and Finance Scout through the default `ToolRegistry`.
+- Exported the finance tools from `app.tools`.
+- Added fake-client tests for SEC filing normalization, SEC company-fact normalization, missing identifier errors, investor-relations page normalization, and Finance Scout registry exposure.
+- Updated README, Phase 14 plan, progress tracker, master plan, and ADR 0016.
+
+Why:
+
+- Tech-Finance intelligence needs first-party and regulator-grade evidence for revenue, capex, guidance, filings, and supply-chain implications.
+- SEC EDGAR JSON APIs provide high-trust public data without introducing paid-provider dependencies.
+- Investor-relations pages should remain inside a curated catalog so Finance Scout can explore company sources without arbitrary web fetching.
+
+Files changed:
+
+- `README.md`
+- `app/config.py`
+- `app/tools/source_tools.py`
+- `app/tools/builtin.py`
+- `app/tools/__init__.py`
+- `tests/tools/test_source_tools.py`
+- `docs/PROGRESS.md`
+- `docs/MASTER_PLAN.md`
+- `docs/plans/phase-14-source-expansion.md`
+- `docs/adr/0016-public-source-tool-boundary.md`
+- `docs/DEV_LOG.md`
+
+Checks:
+
+- `python -m pytest tests\tools\test_source_tools.py -q`: 24 passed.
+- `python -m pytest tests\tools tests\agents\test_registry.py tests\agents\test_runner.py -q`: 38 passed.
+- `python -m pytest tests\scouts\test_profiles.py tests\harness\test_all_scouts_closed_loop.py -q`: 6 passed.
+- `python -m pytest -q`: 118 passed.
+- `python -m compileall app tests`: passed.
+- `git diff --check`: passed.
+- Live smoke: `sec_company_filings` and `sec_company_facts` returned current NVDA items from SEC endpoints.
+
+Effect:
+
+- Finance Scout can now collect SEC filings, SEC XBRL facts, and curated IR page evidence through Connor's existing `FunctionTool -> ToolExecutor -> ToolEnvelope -> EvidenceItem -> TraceEvent` path.
+- SEC evidence carries accession lineage that later evaluators and reports can connect back to EDGAR archive URLs.
+- Missing ticker/CIK, malformed SEC payloads, and source HTTP failures become traceable `ToolError` entries.
+
+Open follow-ups:
+
+- Hacker News is completed in the following log section; Reddit/X social sources still require explicit auth, rate-limit, and content-policy boundaries.
+- Consider moving source catalogs into database/config once Dashboard source management exists.
+
+### Phase 14: Hacker News Community Source Tool
+
+What we did:
+
+- Added `hacker_news_feed_search` for bounded Hacker News official API feed collection.
+- Registered the tool for Orchestrator and Social Scout through the default `ToolRegistry`.
+- Exported the tool from `app.tools`.
+- Implemented bounded feed selection, bounded item fetching, local query matching, and normalized HN item evidence.
+- Preserved HN thread URL, external URL, score, comment count, author, item id, item type, and feed metadata.
+- Added fake-client tests for matching item normalization, unknown feed fallback, malformed feed payloads, and Social Scout registry exposure.
+- Updated Phase 14 plan, progress tracker, master plan, and ADR 0016.
+
+Why:
+
+- Hacker News is a high-signal community source for early AI/model/tooling discussions and has an official public Firebase API.
+- The tool should not depend on third-party search APIs or arbitrary web fetching.
+- Reddit, X/Twitter, and other authenticated social sources need explicit credentials, rate-limit, platform-policy, and content-boundary handling before implementation.
+
+Files changed:
+
+- `app/tools/source_tools.py`
+- `app/tools/builtin.py`
+- `app/tools/__init__.py`
+- `tests/tools/test_source_tools.py`
+- `docs/PROGRESS.md`
+- `docs/MASTER_PLAN.md`
+- `docs/plans/phase-14-source-expansion.md`
+- `docs/adr/0016-public-source-tool-boundary.md`
+- `docs/DEV_LOG.md`
+
+Checks:
+
+- `python -m pytest tests\tools\test_source_tools.py -q`: 28 passed.
+- `python -m pytest tests\tools tests\agents\test_registry.py tests\agents\test_runner.py -q`: 42 passed.
+- `python -m pytest tests\scouts\test_profiles.py tests\harness\test_all_scouts_closed_loop.py -q`: 6 passed.
+- `python -m pytest -q`: 122 passed.
+- `python -m compileall app tests`: passed.
+- `git diff --check`: passed.
+- Live smoke: `hacker_news_feed_search` returned current AI-related Hacker News items.
+
+Effect:
+
+- Social Scout can now collect bounded Hacker News community evidence through Connor's existing `FunctionTool -> ToolExecutor -> ToolEnvelope -> EvidenceItem -> TraceEvent` path.
+- Community-source collection remains traceable, bounded, and policy-conscious.
+
+Open follow-ups:
+
+- Add Reddit/X/Twitter only after auth, rate-limit, platform-policy, and content boundaries are explicit.
+- Consider a dedicated HN item/thread lookup tool if follow-up workflows need comment-level evidence.

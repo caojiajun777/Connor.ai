@@ -149,7 +149,6 @@ class DailyRunHarness:
                 phase=latest_run.phase,
             )
             raise
-
     def resume(
         self,
         run_id: str,

@@ -88,7 +88,6 @@ class QualityGateService:
         if (
             followup_queries
             and run.loop_counters.followup_rounds < run.budgets.max_followup_rounds
-            and run.loop_counters.collect_rounds < run.budgets.max_collect_rounds
         ):
             return CollectGateDecision(
                 outcome=CollectGateOutcome.FOLLOWUP_NOW,

@@ -11,3 +11,11 @@ Start with the project documentation:
 - [Development Log](docs/DEV_LOG.md)
 - [Architecture Decision Records](docs/adr/)
 
+Useful local environment variables:
+
+- `CONNOR_DATABASE_URL`
+- `CONNOR_ARTIFACT_ROOT`
+- `CONNOR_GITHUB_TOKEN`
+- `CONNOR_HUGGINGFACE_TOKEN`
+- `CONNOR_TOOL_USER_AGENT`
+- `CONNOR_SEC_USER_AGENT`

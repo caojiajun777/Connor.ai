@@ -93,7 +93,12 @@ class ArtifactService:
             metadata=metadata or {},
             created_at=utc_now(),
         )
-        self.repository.add(artifact)
+        try:
+            self.repository.add(artifact)
+        except Exception:
+            if storage == ArtifactStorage.FILE and uri is not None:
+                Path(uri).unlink(missing_ok=True)
+            raise
         return artifact
 
     def get(self, artifact_id: str) -> Artifact:

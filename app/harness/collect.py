@@ -58,14 +58,20 @@ class CollectLoopHarness:
         tasks_by_phase = tasks_by_phase or self._tasks_from_run_metadata(run)
 
         while True:
-            if run.loop_counters.collect_rounds >= run.budgets.max_collect_rounds:
-                decision = self.gate_service.evaluate_collect(self.context.runs.get_full_state(run.id))
-                decision = self._force_exhausted_decision(decision)
-                run = self._apply_decision(run, decision)
-                decisions.append(decision)
-                return run, decisions
+            # Followup rounds reuse the same collect round — they do not
+            # consume a fresh collect_rounds slot so the two budgets are
+            # independent.
+            if run.phase == RunPhase.FOLLOWUP:
+                run = self._transition_followup_to_collect(run)
+            else:
+                if run.loop_counters.collect_rounds >= run.budgets.max_collect_rounds:
+                    decision = self.gate_service.evaluate_collect(self.context.runs.get_full_state(run.id))
+                    decision = self._force_exhausted_decision(decision)
+                    run = self._apply_decision(run, decision)
+                    decisions.append(decision)
+                    return run, decisions
+                run = self._start_collect_round(run)
 
-            run = self._start_collect_round(run)
             self._execute_phase_tasks(run, RunPhase.SCOUTING, tasks_by_phase)
             self._execute_phase_tasks(run, RunPhase.CLUSTERING, tasks_by_phase)
             self._execute_phase_tasks(run, RunPhase.EVALUATING, tasks_by_phase)
@@ -91,6 +97,37 @@ class CollectLoopHarness:
                 CollectGateOutcome.FAIL,
             }:
                 return run, decisions
+
+    def _transition_followup_to_collect(self, run: RunState) -> RunState:
+        """Transition from a followup round into a fresh collect planning phase
+        without consuming a collect_rounds slot."""
+
+        self.context.session.flush()
+        next_run = run.model_copy(
+            update={
+                "phase": RunPhase.COLLECT_PLANNING,
+                "status": RunStatus.RUNNING,
+                "updated_at": utc_now(),
+            }
+        )
+        self.context.runs.add(next_run)
+        self.context.trace_service.record_event(
+            run_id=run.id,
+            phase=RunPhase.COLLECT_PLANNING,
+            event_type=TraceEventType.PHASE_STARTED,
+            status=TraceStatus.STARTED,
+            summary=(
+                f"Collect round {run.loop_counters.collect_rounds} resumed "
+                f"after followup (followup round {run.loop_counters.followup_rounds})."
+            ),
+            metadata={
+                "collect_round": run.loop_counters.collect_rounds,
+                "followup_round": run.loop_counters.followup_rounds,
+                "harness": True,
+            },
+        )
+        self.context.session.flush()
+        return next_run
 
     def _start_collect_round(self, run: RunState) -> RunState:
         self.context.session.flush()
@@ -373,7 +410,10 @@ class CollectLoopHarness:
         )
 
     def _force_exhausted_decision(self, decision: CollectGateDecision) -> CollectGateDecision:
-        if decision.outcome == CollectGateOutcome.ENTER_WRITING:
+        if decision.outcome in {
+            CollectGateOutcome.ENTER_WRITING,
+            CollectGateOutcome.FOLLOWUP_NOW,
+        }:
             return decision
         if self.context.config.manual_review_on_failure:
             return CollectGateDecision(
