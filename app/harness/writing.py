@@ -6,7 +6,6 @@ from collections.abc import Mapping
 
 from app.agents import AgentRunRequest
 from app.domain import (
-    AgentRole,
     ArtifactKind,
     DailyReport,
     ReportStatus,
@@ -22,6 +21,7 @@ from app.harness.decisions import AgentTask, WritingGateDecision, WritingGateOut
 from app.harness.exceptions import HarnessError
 from app.harness.gates import QualityGateService
 from app.repositories import DailyReportRepository
+from app.repositories.runs import FullRunState
 from app.writing import WritingOutputMaterializer, WritingTaskFactory
 
 
@@ -77,11 +77,11 @@ class WritingLoopHarness:
             full_state = self.context.runs.get_full_state(run.id)
 
             if not full_state.reports:
-                self._execute_phase_tasks(run, RunPhase.WRITING, tasks_by_phase)
+                self._execute_phase_tasks(run, RunPhase.WRITING, tasks_by_phase, full_state=full_state)
                 full_state = self.context.runs.get_full_state(run.id)
 
             if full_state.reports and not full_state.review_results:
-                self._execute_phase_tasks(run, RunPhase.REVIEWING, tasks_by_phase)
+                self._execute_phase_tasks(run, RunPhase.REVIEWING, tasks_by_phase, full_state=full_state)
                 full_state = self.context.runs.get_full_state(run.id)
 
             decision = self.gate_service.evaluate_writing(full_state)
@@ -111,13 +111,22 @@ class WritingLoopHarness:
                     run = self._apply_decision(run, exhausted)
                     decisions.append(exhausted)
                     return run, decisions
-                self._execute_phase_tasks(run, RunPhase.EDITING, tasks_by_phase)
+                self._execute_phase_tasks(run, RunPhase.EDITING, tasks_by_phase, full_state=full_state)
                 review_phase = (
                     RunPhase.FINAL_REVIEW
                     if tasks_by_phase.get(RunPhase.FINAL_REVIEW)
                     else RunPhase.REVIEWING
                 )
-                self._execute_phase_tasks(run, review_phase, tasks_by_phase)
+                # Transition the run phase to match before executing review
+                # tasks so the persisted run record stays consistent.
+                if review_phase == RunPhase.FINAL_REVIEW:
+                    latest = self.context.runs.require(run.id)
+                    run = latest.model_copy(
+                        update={"phase": RunPhase.FINAL_REVIEW, "updated_at": utc_now()}
+                    )
+                    self.context.runs.add(run)
+                    self.context.session.flush()
+                self._execute_phase_tasks(run, review_phase, tasks_by_phase, full_state=full_state)
                 continue
 
             if decision.outcome in {
@@ -146,7 +155,8 @@ class WritingLoopHarness:
                     run = self._apply_decision(run, no_reviewer)
                     decisions.append(no_reviewer)
                     return run, decisions
-                self._execute_phase_tasks(run, RunPhase.REVIEWING, tasks_by_phase)
+                self._execute_phase_tasks(run, RunPhase.REVIEWING, tasks_by_phase, full_state=full_state)
+                continue
 
     def _start_writing_round(self, run: RunState) -> RunState:
         self.context.session.flush()
@@ -178,6 +188,8 @@ class WritingLoopHarness:
         run: RunState,
         phase: RunPhase,
         tasks_by_phase: Mapping[RunPhase, list[AgentTask]],
+        *,
+        full_state: FullRunState | None = None,
     ) -> None:
         tasks = list(tasks_by_phase.get(phase, []))
         if not tasks:
@@ -206,7 +218,7 @@ class WritingLoopHarness:
                     phase=phase,
                     agent_role=task.agent_role,
                     task=task.task,
-                    context=self._build_task_context(run, phase, task.context),
+                    context=self._build_task_context(run, phase, task.context, full_state=full_state),
                 )
             )
             tool_call_count += len(result.tool_results)
@@ -237,6 +249,8 @@ class WritingLoopHarness:
         run: RunState,
         phase: RunPhase,
         task_context: dict,
+        *,
+        full_state: FullRunState | None = None,
     ) -> dict:
         context = {
             **task_context,
@@ -245,7 +259,10 @@ class WritingLoopHarness:
             "writing_round": run.loop_counters.writing_rounds,
             "selected_cluster_ids": run.selected_cluster_ids,
         }
-        full_state = self.context.runs.get_full_state(run.id)
+        # Reuse the caller's already-fetched FullRunState when available;
+        # only fetch it here as a fallback for callers without one.
+        if full_state is None:
+            full_state = self.context.runs.get_full_state(run.id)
         if phase == RunPhase.WRITING:
             context["writing_context"] = WritingTaskFactory.writer_context(full_state)
         if phase in {RunPhase.REVIEWING, RunPhase.FINAL_REVIEW}:

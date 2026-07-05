@@ -9,7 +9,7 @@ from agentscope.message import TextBlock, ToolResultState
 from agentscope.permission import PermissionBehavior, PermissionDecision
 from agentscope.tool import FunctionTool, ToolChunk, Toolkit
 
-from app.domain import AgentRole, RunPhase, ToolCallStatus
+from app.domain import AgentRole, RunPhase, ToolCallStatus, TraceEventType, TraceStatus
 from app.tools import ToolExecutionContext, ToolExecutionResult, ToolExecutor, ToolRegistry
 
 
@@ -34,12 +34,14 @@ class AgentScopeToolBridge:
         run_id: str,
         phase: RunPhase,
         agent_role: AgentRole,
+        max_tool_calls: int | None = None,
     ):
         self.tool_registry = tool_registry
         self.tool_executor = tool_executor
         self.run_id = run_id
         self.phase = phase
         self.agent_role = agent_role
+        self.max_tool_calls = max_tool_calls
         self.executed_results: list[ToolExecutionResult] = []
 
     def create_toolkit(self, allowed_tool_names: list[str]) -> Toolkit:
@@ -61,9 +63,26 @@ class AgentScopeToolBridge:
 
         return Toolkit(tools=tools)
 
+    def agent_visible_tool_results(self) -> list[dict[str, Any]]:
+        """Return executed tool results in the same compact form shown to agents."""
+
+        return [self._agent_visible_payload(result) for result in self.executed_results]
+
+    def executed_evidence_ids(self) -> list[str]:
+        """Return evidence IDs created by successful tool executions."""
+
+        return [
+            item.id
+            for result in self.executed_results
+            for item in result.evidence_items
+        ]
+
     def _create_connor_tool(self, tool_name: str):
         def connor_tool(query: str, params: dict[str, Any] | None = None) -> ToolChunk:
             """Execute a Connor.ai tool and return traceable evidence IDs."""
+
+            if self.max_tool_calls is not None and len(self.executed_results) >= self.max_tool_calls:
+                return self._tool_budget_exceeded_chunk(tool_name)
 
             result = self.tool_executor.execute(
                 tool_name=tool_name,
@@ -95,6 +114,52 @@ class AgentScopeToolBridge:
             )
 
         return connor_tool
+
+    def _tool_budget_exceeded_chunk(self, tool_name: str) -> ToolChunk:
+        message = (
+            f"Tool budget exhausted for {self.agent_role.value}: "
+            f"max_tool_calls={self.max_tool_calls}. Stop calling tools and "
+            "return the final JSON using evidence_ids from previous successful "
+            "tool results. Do not invent evidence_ids."
+        )
+        trace_event = self.tool_executor.trace_service.record_event(
+            run_id=self.run_id,
+            phase=self.phase,
+            agent_role=self.agent_role,
+            event_type=TraceEventType.ERROR,
+            status=TraceStatus.FAILED,
+            summary=f"Rejected extra tool call to {tool_name}; tool budget exhausted.",
+            error=message,
+            metadata={
+                "tool_name": tool_name,
+                "max_tool_calls": self.max_tool_calls,
+                "executed_tool_calls": len(self.executed_results),
+                "tool_budget_exhausted": True,
+            },
+        )
+        self.tool_executor.session.flush()
+        return ToolChunk(
+            content=[
+                TextBlock(
+                    text=json.dumps(
+                        {
+                            "tool_name": tool_name,
+                            "status": "tool_budget_exhausted",
+                            "trace_event_id": trace_event.id,
+                            "message": message,
+                            "previous_evidence_ids": [
+                                item.id
+                                for result in self.executed_results
+                                for item in result.evidence_items
+                            ],
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                )
+            ],
+            state=ToolResultState.ERROR,
+        )
 
     @staticmethod
     def _agent_visible_payload(result: ToolExecutionResult) -> dict[str, Any]:

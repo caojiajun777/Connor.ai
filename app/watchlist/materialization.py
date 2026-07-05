@@ -190,7 +190,7 @@ class WatchlistOutputMaterializer:
     def _create_or_update_watchlist(self, *, run: RunState, draft: WatchlistDraft) -> WatchlistItem:
         now = utc_now()
         cluster_ids, evidence_ids, entities, topics = self._lineage_from_watch_draft(run.id, draft)
-        ttl_days = draft.ttl_days or DEFAULT_TTL_DAYS[draft.watch_tier]
+        ttl_days, draft_metadata = self._normalized_ttl_days(draft)
         watchlist_id = draft.watchlist_id or deterministic_id(
             IdPrefix.WATCHLIST,
             {
@@ -247,7 +247,7 @@ class WatchlistOutputMaterializer:
                     "history": existing.history + [history_entry],
                     "metadata": {
                         **existing.metadata,
-                        **draft.metadata,
+                        **draft_metadata,
                         "source_evaluation_id": draft.source_evaluation_id,
                         "materialized_by": "WatchlistOutputMaterializer",
                     },
@@ -277,12 +277,28 @@ class WatchlistOutputMaterializer:
             thread_id=thread_id,
             history=[history_entry],
             metadata={
-                **draft.metadata,
+                **draft_metadata,
                 "source_evaluation_id": draft.source_evaluation_id,
                 "materialized_by": "WatchlistOutputMaterializer",
             },
             created_at=now,
         )
+
+    @staticmethod
+    def _normalized_ttl_days(draft: WatchlistDraft) -> tuple[int, dict]:
+        ttl_days = draft.ttl_days or DEFAULT_TTL_DAYS[draft.watch_tier]
+        metadata = dict(draft.metadata)
+        if draft.watch_tier == WatchTier.SHORT:
+            normalized = min(max(ttl_days, 1), 7)
+        elif draft.watch_tier == WatchTier.EVENT:
+            normalized = min(max(ttl_days, 7), 21)
+        else:
+            normalized = min(max(ttl_days, 30), 90)
+
+        if normalized != ttl_days:
+            metadata["normalized_ttl_days_from"] = ttl_days
+            metadata["normalized_ttl_days_to"] = normalized
+        return normalized, metadata
 
     def _create_or_update_archive(self, *, run: RunState, draft: ArchiveDraft) -> ArchivedSignal:
         now = utc_now()

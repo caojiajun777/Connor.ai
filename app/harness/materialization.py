@@ -12,11 +12,11 @@ from app.domain import (
     CandidateCategory,
     CandidateItem,
     ClusterTimelineEntry,
-    ConfidenceLevel,
     EvaluationDecision,
     EvaluationResult,
     EvaluationType,
     EventCluster,
+    EvidenceItem,
     EvidenceStrength,
     RunPhase,
     RunState,
@@ -134,11 +134,47 @@ class ScoutOutputMaterializer:
         draft: CandidateDraft,
         available_evidence_ids: list[str],
     ) -> CandidateItem:
-        evidence_ids = list(draft.evidence_ids) if draft.evidence_ids else list(available_evidence_ids)
-        if not evidence_ids and draft.signal_status != SignalStatus.MANUAL_HYPOTHESIS:
-            raise HarnessError("Scout candidate draft requires evidence_ids from output or tool results.")
-        evidence_items = [self.evidence.require(evidence_id) for evidence_id in evidence_ids]
+        requested_evidence_ids = list(draft.evidence_ids)
+        fallback_evidence_ids = list(available_evidence_ids)
+        evidence_ids, evidence_items = self._resolve_evidence_ids(requested_evidence_ids)
+        if requested_evidence_ids and not evidence_ids:
+            evidence_ids, evidence_items = self._resolve_evidence_ids(fallback_evidence_ids)
+        elif not requested_evidence_ids:
+            evidence_ids, evidence_items = self._resolve_evidence_ids(fallback_evidence_ids)
+
+        metadata = dict(draft.metadata)
+        if requested_evidence_ids and set(requested_evidence_ids) != set(evidence_ids):
+            metadata["requested_evidence_ids"] = requested_evidence_ids
+            metadata["resolved_evidence_ids"] = evidence_ids
+
+        if not evidence_ids:
+            # When an agent produces a draft without valid tool-sourced
+            # evidence, keep the object auditable by downgrading it to a
+            # manual hypothesis instead of persisting invented evidence IDs.
+            updates = {
+                "signal_status": SignalStatus.MANUAL_HYPOTHESIS,
+                "evidence_strength": EvidenceStrength.UNKNOWN,
+                "metadata": {
+                    **metadata,
+                    "normalized_missing_evidence": True,
+                },
+            }
+            if draft.category == CandidateCategory.CONFIRMED_EVENT:
+                updates["category"] = CandidateCategory.OFFICIAL_UPDATE
+            draft = draft.model_copy(update=updates)
+            metadata = dict(draft.metadata)
+        draft, metadata = self._normalize_draft_for_profile(
+            agent_role=agent_role,
+            draft=draft,
+            metadata=metadata,
+        )
         profile = self.scout_profiles.require(agent_role)
+        if profile.required_followup_questions and not draft.followup_questions:
+            draft, metadata = self._add_default_followup_question(
+                agent_role=agent_role,
+                draft=draft,
+                metadata=metadata,
+            )
         try:
             profile.validate_draft(draft, evidence_items)
         except ScoutProfileError as exc:
@@ -170,12 +206,102 @@ class ScoutOutputMaterializer:
             followup_questions=draft.followup_questions,
             created_by_agent=agent_role,
             metadata={
-                **draft.metadata,
+                **metadata,
                 "materialized_by": "ScoutOutputMaterializer",
                 "scout_profile": profile.role.value,
             },
             created_at=utc_now(),
         )
+
+    @staticmethod
+    def _normalize_draft_for_profile(
+        *,
+        agent_role: AgentRole,
+        draft: CandidateDraft,
+        metadata: dict,
+    ) -> tuple[CandidateDraft, dict]:
+        """Normalize common LLM category slips that are still role-valid."""
+
+        if (
+            agent_role == AgentRole.FINANCE_SCOUT
+            and draft.category != CandidateCategory.TECH_FINANCE
+        ):
+            next_metadata = {
+                **metadata,
+                "normalized_category_from": draft.category.value,
+                "normalized_category_reason": "finance_scout_outputs_tech_finance",
+            }
+            next_draft = draft.model_copy(
+                update={
+                    "category": CandidateCategory.TECH_FINANCE,
+                    "metadata": next_metadata,
+                }
+            )
+            return next_draft, next_metadata
+
+        if (
+            agent_role == AgentRole.OFFICIAL_SCOUT
+            and draft.category
+            not in {
+                CandidateCategory.CONFIRMED_EVENT,
+                CandidateCategory.OFFICIAL_UPDATE,
+            }
+        ):
+            next_metadata = {
+                **metadata,
+                "normalized_category_from": draft.category.value,
+                "normalized_category_reason": "official_scout_outputs_official_update",
+            }
+            next_draft = draft.model_copy(
+                update={
+                    "category": CandidateCategory.OFFICIAL_UPDATE,
+                    "metadata": next_metadata,
+                }
+            )
+            return next_draft, next_metadata
+
+        return draft, metadata
+
+    @staticmethod
+    def _add_default_followup_question(
+        *,
+        agent_role: AgentRole,
+        draft: CandidateDraft,
+        metadata: dict,
+    ) -> tuple[CandidateDraft, dict]:
+        followup_by_role = {
+            AgentRole.SOCIAL_SCOUT: (
+                "Seek independent corroboration and monitor whether the discussion "
+                "turns into an official or code-visible signal."
+            ),
+            AgentRole.CODE_MODEL_SCOUT: (
+                "Monitor related repositories, model pages, package metadata, and "
+                "release notes for confirming changes."
+            ),
+            AgentRole.RESEARCH_SCOUT: (
+                "Track paper revisions, code release, benchmark replication, and "
+                "follow-on discussion from the authors or venue."
+            ),
+            AgentRole.OFFICIAL_SCOUT: (
+                "Track rollout scope, documentation updates, pricing or limit changes, "
+                "SDK support, and downstream product adoption."
+            ),
+            AgentRole.FINANCE_SCOUT: (
+                "Track the next filing, earnings commentary, supplier signal, and "
+                "ticker-level impact chain."
+            ),
+        }
+        next_metadata = {
+            **metadata,
+            "normalized_missing_followup_questions": True,
+        }
+        next_draft = draft.model_copy(
+            update={
+                "followup_questions": [followup_by_role.get(agent_role, "Track follow-up evidence.")],
+                "metadata": next_metadata,
+            }
+        )
+        return next_draft, next_metadata
 
     def _create_bootstrap_cluster(self, *, run: RunState, candidate: CandidateItem) -> EventCluster:
         cluster_id = self._stable_id(
@@ -303,6 +429,16 @@ class ScoutOutputMaterializer:
         for tool_result in result.tool_results:
             evidence_ids.extend(item.id for item in tool_result.evidence_items)
         return ScoutOutputMaterializer._dedupe(evidence_ids)
+
+    def _resolve_evidence_ids(self, evidence_ids: list[str]) -> tuple[list[str], list[EvidenceItem]]:
+        evidence_items: list[EvidenceItem] = []
+        valid_evidence_ids: list[str] = []
+        for evidence_id in self._dedupe(evidence_ids):
+            item = self.evidence.get(evidence_id)
+            if item is not None:
+                evidence_items.append(item)
+                valid_evidence_ids.append(evidence_id)
+        return valid_evidence_ids, evidence_items
 
     @staticmethod
     def _dedupe(values: list[str]) -> list[str]:

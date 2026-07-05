@@ -10,7 +10,6 @@ from app.core.ids import deterministic_id
 from sqlalchemy.orm import Session
 
 from app.domain import (
-    AgentRole,
     EvidenceItem,
     ToolCallStatus,
     ToolEnvelope,

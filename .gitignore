@@ -7,6 +7,11 @@ pytest-cache-files-*/
 .venv/
 .env
 .env.*
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+artifacts/
 test_tmp/
 pytest_tmp*/
 .pytest_tmp/

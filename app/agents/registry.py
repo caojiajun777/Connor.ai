@@ -56,7 +56,14 @@ class AgentRoleRegistry:
         return list(self._configs.values())
 
 
-def create_default_agent_role_registry(tool_registry: ToolRegistry) -> AgentRoleRegistry:
+DEVELOPMENT_TOOL_NAMES = {"manual_seed", "mock_search"}
+
+
+def create_default_agent_role_registry(
+    tool_registry: ToolRegistry,
+    *,
+    include_development_tools: bool = True,
+) -> AgentRoleRegistry:
     """Create role configs using registered tool permissions."""
 
     registry = AgentRoleRegistry()
@@ -99,7 +106,9 @@ def create_default_agent_role_registry(tool_registry: ToolRegistry) -> AgentRole
                 display_name=role.value.replace("_", " ").title(),
                 system_prompt=system_prompt,
                 allowed_tool_names=[
-                    spec.name for spec in tool_registry.list_for_agent(role)
+                    spec.name
+                    for spec in tool_registry.list_for_agent(role)
+                    if include_development_tools or spec.name not in DEVELOPMENT_TOOL_NAMES
                 ],
                 output_model=output_model,
                 execution=AgentExecutionConfig(),

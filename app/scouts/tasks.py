@@ -31,7 +31,17 @@ class ScoutTaskFactory:
                 "scout_profile": profile.context_payload(),
                 "candidate_output_contract": (
                     "Return candidate_drafts. Do not claim facts beyond evidence. "
+                    "Every candidate_draft must cite evidence_ids copied exactly "
+                    "from successful tool results. If no tool returns useful "
+                    "evidence, return followup_queries and no candidate_drafts. "
                     "Use uncertainty and followup_questions."
+                ),
+                "tool_use_policy": (
+                    "Use the smallest number of relevant source tools needed for "
+                    "this Scout profile, usually one. After a tool returns evidence_ids, "
+                    "stop calling tools and produce the final structured JSON. "
+                    "Never call mock_search in a production-style run unless the task "
+                    "explicitly asks for deterministic mock evidence."
                 ),
                 **(context or {}),
             },

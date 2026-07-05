@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.domain import EvaluationResult, EvidenceItem, EventCluster, ReviewResult, RunState
+from app.domain import EvaluationResult, EvidenceItem, EventCluster
 from app.repositories.runs import FullRunState
 
 

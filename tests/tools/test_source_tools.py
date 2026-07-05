@@ -624,18 +624,27 @@ def test_source_tool_invalid_timeout_param_falls_back_to_default() -> None:
     assert client.calls[0]["timeout_seconds"] == 20
 
 
-def test_default_registry_exposes_source_tools_to_code_model_scout() -> None:
+def test_default_registry_aligns_source_tools_with_scout_profiles() -> None:
     registry = create_default_tool_registry()
-    names = {spec.name for spec in registry.list_for_agent(AgentRole.CODE_MODEL_SCOUT)}
+    code_names = {spec.name for spec in registry.list_for_agent(AgentRole.CODE_MODEL_SCOUT)}
+    research_names = {spec.name for spec in registry.list_for_agent(AgentRole.RESEARCH_SCOUT)}
 
     assert {
         "github_repository_search",
         "github_code_search",
         "huggingface_model_search",
         "huggingface_dataset_search",
+    }.issubset(code_names)
+    assert "arxiv_search" not in code_names
+    assert "openreview_note_search" not in code_names
+    assert {
+        "huggingface_model_search",
+        "huggingface_dataset_search",
         "arxiv_search",
         "openreview_note_search",
-    }.issubset(names)
+    }.issubset(research_names)
+    assert "github_repository_search" not in research_names
+    assert "github_code_search" not in research_names
     assert registry.get("github_code_search").spec.source_type == SourceType.GITHUB
 
 

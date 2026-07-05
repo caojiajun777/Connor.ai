@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.agents.outputs import (
@@ -233,7 +234,13 @@ class WritingOutputMaterializer:
         report_id = existing.id if existing is not None else self._new_report_id(run, draft, agent_role)
         sections = [self._section_from_draft(run.id, section) for section in draft.sections]
         evidence_map = self._evidence_map_for_sections(run.id, sections)
-        watchlist_updates = self._watchlist_updates_for_report(run.id, sections, draft)
+        watchlist_updates = self._watchlist_updates_for_report(
+            run_id=run.id,
+            phase=phase,
+            agent_role=agent_role,
+            sections=sections,
+            draft=draft,
+        )
         trace_timeline_ids = [event.id for event in self.context.runs.get_full_state(run.id).trace_events]
         metadata = {
             **(existing.metadata if existing is not None else {}),
@@ -290,6 +297,7 @@ class WritingOutputMaterializer:
         )
 
     def _item_from_draft(self, run_id: str, draft: ReportItemDraft) -> ReportItem:
+        draft = self._normalize_item_category_from_clusters(run_id, draft)
         self._validate_item_lineage(run_id, draft)
         item_id = draft.item_id or deterministic_id(
             "item",
@@ -316,6 +324,27 @@ class WritingOutputMaterializer:
             followup_points=draft.followup_points,
             uncertainty_label=draft.uncertainty_label,
         )
+
+    def _normalize_item_category_from_clusters(
+        self,
+        run_id: str,
+        draft: ReportItemDraft,
+    ) -> ReportItemDraft:
+        clusters = []
+        for cluster_id in draft.cluster_ids:
+            try:
+                cluster = self.clusters.require(cluster_id)
+            except LookupError as exc:
+                raise HarnessError(str(exc)) from exc
+            if cluster.run_id != run_id:
+                raise HarnessError(f"report item cluster {cluster_id} does not belong to run {run_id}")
+            clusters.append(cluster)
+        categories = {cluster.category for cluster in clusters}
+        if len(categories) == 1:
+            category = next(iter(categories))
+            if category != draft.category:
+                return draft.model_copy(update={"category": category})
+        return draft
 
     def _validate_item_lineage(self, run_id: str, draft: ReportItemDraft) -> None:
         clusters = []
@@ -393,12 +422,37 @@ class WritingOutputMaterializer:
 
     def _watchlist_updates_for_report(
         self,
+        *,
         run_id: str,
+        phase: RunPhase,
+        agent_role: AgentRole,
         sections: list[ReportSection],
         draft: ReportDraft,
     ) -> list[WatchlistUpdate]:
         if draft.watchlist_updates:
-            return [WatchlistUpdate.model_validate(update) for update in draft.watchlist_updates]
+            normalized_updates, normalized_count, skipped_count = (
+                self._watchlist_updates_from_draft(run_id, draft.watchlist_updates)
+            )
+            if normalized_count or skipped_count:
+                self.context.trace_service.record_event(
+                    run_id=run_id,
+                    phase=phase,
+                    agent_role=agent_role,
+                    event_type=TraceEventType.AGENT_DECISION,
+                    status=TraceStatus.SUCCEEDED,
+                    summary="Writing materializer normalized draft watchlist updates.",
+                    reasoning_summary=(
+                        "The writer returned watchlist update fields in watchlist-item "
+                        "shape; materialization mapped them into report update shape."
+                    ),
+                    metadata={
+                        "normalized_count": normalized_count,
+                        "skipped_count": skipped_count,
+                        "materialized_by": "WritingOutputMaterializer",
+                    },
+                )
+            if normalized_updates:
+                return normalized_updates
 
         cluster_ids = {
             cluster_id
@@ -421,6 +475,102 @@ class WritingOutputMaterializer:
                 )
             )
         return updates
+
+    def _watchlist_updates_from_draft(
+        self,
+        run_id: str,
+        raw_updates: list[dict],
+    ) -> tuple[list[WatchlistUpdate], int, int]:
+        full_state = self.context.runs.get_full_state(run_id)
+        watchlist_by_id = {item.id: item for item in full_state.watchlist}
+
+        updates: list[WatchlistUpdate] = []
+        normalized_count = 0
+        skipped_count = 0
+        for raw_update in raw_updates:
+            if not isinstance(raw_update, dict):
+                skipped_count += 1
+                continue
+            try:
+                updates.append(WatchlistUpdate.model_validate(raw_update))
+                continue
+            except ValidationError:
+                pass
+
+            normalized = self._normalize_watchlist_update(raw_update, watchlist_by_id)
+            if normalized is None:
+                skipped_count += 1
+                continue
+            try:
+                updates.append(WatchlistUpdate.model_validate(normalized))
+                normalized_count += 1
+            except ValidationError:
+                skipped_count += 1
+        return updates, normalized_count, skipped_count
+
+    @staticmethod
+    def _normalize_watchlist_update(
+        raw_update: dict,
+        watchlist_by_id: dict[str, object],
+    ) -> dict | None:
+        watchlist_id = raw_update.get("watchlist_id") or raw_update.get("id")
+        if not isinstance(watchlist_id, str) or not watchlist_id.strip():
+            return None
+
+        existing = watchlist_by_id.get(watchlist_id)
+        existing_topic = getattr(existing, "topic", None)
+        existing_status = getattr(getattr(existing, "status", None), "value", None)
+        existing_evidence_ids = getattr(existing, "evidence_ids", None)
+        existing_open_questions = getattr(existing, "open_questions", None)
+        existing_reactivation_rules = getattr(existing, "reactivation_rules", None)
+
+        topic = (
+            raw_update.get("topic")
+            or raw_update.get("title")
+            or raw_update.get("thesis")
+            or existing_topic
+        )
+        current_status = (
+            raw_update.get("current_status")
+            or raw_update.get("status")
+            or existing_status
+            or "active"
+        )
+        new_developments = WritingOutputMaterializer._string_list(
+            raw_update.get("new_developments")
+            or raw_update.get("developments")
+            or raw_update.get("today_new")
+            or raw_update.get("thesis")
+        )
+        next_watch = WritingOutputMaterializer._string_list(
+            raw_update.get("next_watch")
+            or raw_update.get("open_questions")
+            or raw_update.get("followup_points")
+            or existing_open_questions
+            or existing_reactivation_rules
+        )
+        evidence_ids = WritingOutputMaterializer._string_list(
+            raw_update.get("evidence_ids") or existing_evidence_ids
+        )
+
+        return {
+            "watchlist_id": watchlist_id,
+            "topic": topic,
+            "current_status": current_status,
+            "new_developments": new_developments,
+            "next_watch": next_watch,
+            "evidence_ids": evidence_ids,
+        }
+
+    @staticmethod
+    def _string_list(value) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [str(item) for item in value if item is not None and str(item).strip()]
+        if isinstance(value, str) and value.strip():
+            return [value]
+        return []
 
     def _create_review(
         self,
@@ -523,27 +673,47 @@ class WritingOutputMaterializer:
     def _contains_confirmed_fact_language(text: str) -> bool:
         normalized = text.strip().lower()
         uncertainty_markers = {
+            # English
             "unconfirmed",
             "not confirmed",
             "not yet confirmed",
-            "未确认",
-            "尚未确认",
-            "灰度",
             "rumor",
             "reported",
             "signal",
+            # Chinese
+            "未确认",
+            "尚未确认",
+            "灰度",
+            # Japanese
+            "未確認",
+            "確認されていない",
+            "噂",
+            # Korean
+            "미확인",
+            "확인되지 않음",
+            "루머",
         }
         if any(marker in normalized for marker in uncertainty_markers):
             return False
         fact_markers = {
+            # English
             "confirmed",
             "officially confirmed",
             "has launched",
             "has released",
+            # Chinese
             "已确认",
             "正式确认",
             "已经发布",
             "事实",
+            # Japanese
+            "確認済み",
+            "正式に確認",
+            "リリース済み",
+            # Korean
+            "확인됨",
+            "공식 확인",
+            "출시됨",
         }
         return any(marker in normalized for marker in fact_markers)
 

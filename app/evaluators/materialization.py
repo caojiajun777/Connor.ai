@@ -90,6 +90,35 @@ class EvaluatorOutputMaterializer:
         materialized = EvaluationMaterializationResult()
         for draft in result.structured_output.evaluation_drafts:
             cluster = self._cluster_for_run(run.id, draft.cluster_id)
+            if cluster.category not in profile.allowed_categories:
+                self.context.trace_service.record_event(
+                    run_id=run.id,
+                    phase=phase,
+                    agent_role=agent_role,
+                    event_type=TraceEventType.AGENT_DECISION,
+                    status=TraceStatus.SKIPPED,
+                    summary=(
+                        f"{agent_role.value} skipped ineligible cluster "
+                        f"{cluster.id} ({cluster.category.value})."
+                    ),
+                    reasoning_summary=(
+                        "Evaluator draft targeted a cluster category outside this "
+                        "role profile; another evaluator role owns that category."
+                    ),
+                    input_payload=draft.model_dump(mode="json"),
+                    metadata={
+                        "cluster_id": cluster.id,
+                        "cluster_category": cluster.category.value,
+                        "allowed_categories": [
+                            category.value for category in profile.allowed_categories
+                        ],
+                        "materialized_by": "EvaluatorOutputMaterializer",
+                        "skip_reason": "ineligible_cluster_category",
+                    },
+                )
+                continue
+            draft = self._normalize_score_scale(draft)
+            draft = self._normalize_decision_for_score(draft)
             try:
                 profile.validate_draft(draft, cluster)
                 evaluation = self._create_evaluation(
@@ -131,6 +160,71 @@ class EvaluatorOutputMaterializer:
         self._update_run_metadata(run.id, agent_role, materialized)
         self.context.session.flush()
         return materialized
+
+    @staticmethod
+    def _normalize_score_scale(draft: EvaluationDraft) -> EvaluationDraft:
+        """Normalize common 0-100 or summed score slips into the 0-10 scale."""
+
+        metadata = dict(draft.metadata)
+        dimension_scores = dict(draft.dimension_scores)
+        normalized_dimensions: dict[str, float] = {}
+        original_dimensions: dict[str, float] = {}
+        for name, score in dimension_scores.items():
+            if 10 < score <= 100:
+                original_dimensions[name] = score
+                normalized_dimensions[name] = round(score / 10, 2)
+            else:
+                normalized_dimensions[name] = score
+
+        total_score = draft.total_score
+        if original_dimensions:
+            metadata["normalized_dimension_scores_from"] = original_dimensions
+
+        if total_score > 10 and normalized_dimensions:
+            metadata["normalized_total_score_from"] = total_score
+            total_score = round(sum(normalized_dimensions.values()) / len(normalized_dimensions), 2)
+        elif 10 < total_score <= 100:
+            metadata["normalized_total_score_from"] = total_score
+            total_score = round(total_score / 10, 2)
+
+        if metadata != draft.metadata or normalized_dimensions != dimension_scores:
+            return draft.model_copy(
+                update={
+                    "dimension_scores": normalized_dimensions,
+                    "total_score": total_score,
+                    "metadata": metadata,
+                }
+            )
+        return draft
+
+    @staticmethod
+    def _normalize_decision_for_score(draft: EvaluationDraft) -> EvaluationDraft:
+        """Downgrade contradictory confirmed selections to follow-up."""
+
+        if draft.decision == EvaluationDecision.SELECT_CONFIRMED:
+            reasons = []
+            if draft.total_score < 6:
+                reasons.append("below_score_threshold")
+            if draft.missing_evidence:
+                reasons.append("missing_evidence")
+            if not reasons:
+                return draft
+            metadata = {
+                **draft.metadata,
+                "normalized_decision_from": draft.decision.value,
+                "normalized_decision_reason": "select_confirmed_" + "_and_".join(reasons),
+            }
+            required_followups = list(draft.required_followups) or list(draft.missing_evidence) or [
+                "Resolve the low evaluation score before selecting this cluster as confirmed."
+            ]
+            return draft.model_copy(
+                update={
+                    "decision": EvaluationDecision.FOLLOWUP_NOW,
+                    "required_followups": required_followups,
+                    "metadata": metadata,
+                }
+            )
+        return draft
 
     def _cluster_for_run(self, run_id: str, cluster_id: str) -> EventCluster:
         try:

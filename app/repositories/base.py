@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel
-from sqlalchemy import Select, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 DomainT = TypeVar("DomainT", bound=BaseModel)

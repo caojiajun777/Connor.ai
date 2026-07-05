@@ -19,7 +19,6 @@ from app.domain import (
     Artifact,
     ArtifactKind,
     ArtifactRef,
-    ArtifactStorage,
     CandidateItem,
     DailyReport,
     EvaluationResult,

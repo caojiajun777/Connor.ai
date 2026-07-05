@@ -127,6 +127,46 @@ def test_archive_draft_archives_existing_watch_item(db_session) -> None:
     assert TraceEventType.THREAD_UPDATED in [event.event_type for event in timeline.events]
 
 
+def test_watchlist_materializer_clamps_ttl_to_tier_window(db_session) -> None:
+    context = HarnessContext(db_session)
+    run = run_state_fixture()
+    context.runs.add(run)
+    early = _persist_early_bundle(db_session, include_watch=False)
+
+    result = AgentRunResult(
+        run_id=RUN_ID,
+        phase=RunPhase.WATCHLIST_UPDATE,
+        agent_role=AgentRole.WATCHLIST_AGENT,
+        structured_output=WatchlistAgentOutput(
+            summary="Watchlist Agent opened one short watch with oversized ttl.",
+            watchlist_drafts=[
+                WatchlistDraft(
+                    watchlist_id="watch_agent_openai_reasoning",
+                    source_evaluation_id=early["evaluation"].id,
+                    topic="OpenAI reasoning-control API watch",
+                    thesis="OpenAI may be exposing finer-grained reasoning controls.",
+                    watch_tier=WatchTier.SHORT,
+                    ttl_days=30,
+                    reactivation_rules=["Reactivate on official API changelog evidence."],
+                    evidence_ids=[item.id for item in early["evidence"]],
+                )
+            ],
+        ),
+    )
+
+    WatchlistOutputMaterializer(context).materialize(
+        run=run,
+        phase=RunPhase.WATCHLIST_UPDATE,
+        agent_role=AgentRole.WATCHLIST_AGENT,
+        result=result,
+    )
+
+    watch = WatchlistRepository(db_session).require("watch_agent_openai_reasoning")
+    assert watch.ttl_days == 7
+    assert watch.metadata["normalized_ttl_days_from"] == 30
+    assert watch.metadata["normalized_ttl_days_to"] == 7
+
+
 def test_thread_timeline_merge_keeps_same_event_with_different_time() -> None:
     first = ThreadTimelineEntry(
         event_at=BASE_TIME,

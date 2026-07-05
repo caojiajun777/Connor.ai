@@ -221,6 +221,63 @@ def invalid_finance_response(
     )
 
 
+def categorized_finance_response(category: str) -> ResponseFactory:
+    def _response(
+        messages: list[Msg],
+        _tools: list[dict] | None,
+        _call_index: int,
+    ) -> ChatResponse:
+        evidence_ids = evidence_ids_from_messages(messages)
+        payload = scout_payload(AgentRole.FINANCE_SCOUT, evidence_ids)
+        payload["candidate_drafts"][0]["category"] = category
+        payload["candidate_drafts"][0]["signal_status"] = "confirmed_fact"
+        return ChatResponse(
+            content=[TextBlock(text=json.dumps(payload, ensure_ascii=False))],
+            is_last=True,
+        )
+
+    return _response
+
+
+def confirmed_event_finance_response(
+    messages: list[Msg],
+    tools: list[dict] | None,
+    call_index: int,
+) -> ChatResponse:
+    return categorized_finance_response("confirmed_event")(messages, tools, call_index)
+
+
+def official_response_without_followups(
+    messages: list[Msg],
+    _tools: list[dict] | None,
+    _call_index: int,
+) -> ChatResponse:
+    evidence_ids = evidence_ids_from_messages(messages)
+    payload = scout_payload(AgentRole.OFFICIAL_SCOUT, evidence_ids)
+    payload["candidate_drafts"][0]["followup_questions"] = []
+    return ChatResponse(
+        content=[TextBlock(text=json.dumps(payload, ensure_ascii=False))],
+        is_last=True,
+    )
+
+
+def categorized_official_response(category: str) -> ResponseFactory:
+    def _response(
+        messages: list[Msg],
+        _tools: list[dict] | None,
+        _call_index: int,
+    ) -> ChatResponse:
+        evidence_ids = evidence_ids_from_messages(messages)
+        payload = scout_payload(AgentRole.OFFICIAL_SCOUT, evidence_ids)
+        payload["candidate_drafts"][0]["category"] = category
+        return ChatResponse(
+            content=[TextBlock(text=json.dumps(payload, ensure_ascii=False))],
+            is_last=True,
+        )
+
+    return _response
+
+
 def test_all_scouts_create_materialized_items_and_pass_collect_gate(db_session) -> None:
     tool_registry = create_default_tool_registry()
     role_registry = create_default_agent_role_registry(tool_registry)
@@ -287,6 +344,145 @@ def test_all_scouts_create_materialized_items_and_pass_collect_gate(db_session) 
     assert event_types.count(TraceEventType.EVALUATION_CREATED) == 5
 
 
+@pytest.mark.parametrize(
+    "category",
+    ["confirmed_event", "other", "watchlist_update", "early_signal"],
+)
+def test_materializer_normalizes_finance_categories_to_tech_finance(
+    db_session,
+    category,
+) -> None:
+    tool_registry = create_default_tool_registry()
+    role_registry = create_default_agent_role_registry(tool_registry)
+    model = ScriptedScoutModel(
+        AgentRole.FINANCE_SCOUT,
+        [manual_seed_tool_call(AgentRole.FINANCE_SCOUT), categorized_finance_response(category)],
+    )
+    agent_runner = AgentRunner(
+        db_session,
+        role_registry=role_registry,
+        tool_registry=tool_registry,
+        model_factory=lambda _config: model,
+    )
+    daily_harness = DailyRunHarness(
+        db_session,
+        agent_runner=agent_runner,
+        config=HarnessConfig(min_selected_items=1),
+    )
+    fixture = run_state_fixture()
+    run = daily_harness.create_run(
+        run_id=RUN_ID,
+        report_date=fixture.report_date,
+        objective=fixture.objective,
+        budgets=RunBudgets(max_collect_rounds=1),
+    )
+
+    CollectLoopHarness(daily_harness.context).run(
+        run,
+        tasks_by_phase={
+            RunPhase.SCOUTING: [
+                ScoutTaskFactory().create_task(
+                    AgentRole.FINANCE_SCOUT,
+                    objective=fixture.objective,
+                )
+            ]
+        },
+    )
+
+    candidates = CandidateRepository(db_session).list_by_run(RUN_ID)
+    assert len(candidates) == 1
+    assert candidates[0].category == "tech_finance"
+    assert candidates[0].metadata["normalized_category_from"] == category
+
+
+def test_materializer_adds_default_followup_for_official_scout(db_session) -> None:
+    tool_registry = create_default_tool_registry()
+    role_registry = create_default_agent_role_registry(tool_registry)
+    model = ScriptedScoutModel(
+        AgentRole.OFFICIAL_SCOUT,
+        [manual_seed_tool_call(AgentRole.OFFICIAL_SCOUT), official_response_without_followups],
+    )
+    agent_runner = AgentRunner(
+        db_session,
+        role_registry=role_registry,
+        tool_registry=tool_registry,
+        model_factory=lambda _config: model,
+    )
+    daily_harness = DailyRunHarness(
+        db_session,
+        agent_runner=agent_runner,
+        config=HarnessConfig(min_selected_items=1),
+    )
+    fixture = run_state_fixture()
+    run = daily_harness.create_run(
+        run_id=RUN_ID,
+        report_date=fixture.report_date,
+        objective=fixture.objective,
+        budgets=RunBudgets(max_collect_rounds=1),
+    )
+
+    CollectLoopHarness(daily_harness.context).run(
+        run,
+        tasks_by_phase={
+            RunPhase.SCOUTING: [
+                ScoutTaskFactory().create_task(
+                    AgentRole.OFFICIAL_SCOUT,
+                    objective=fixture.objective,
+                )
+            ]
+        },
+    )
+
+    candidates = CandidateRepository(db_session).list_by_run(RUN_ID)
+    assert len(candidates) == 1
+    assert candidates[0].followup_questions
+    assert candidates[0].metadata["normalized_missing_followup_questions"] is True
+
+
+def test_materializer_normalizes_official_categories_to_official_update(db_session) -> None:
+    tool_registry = create_default_tool_registry()
+    role_registry = create_default_agent_role_registry(tool_registry)
+    model = ScriptedScoutModel(
+        AgentRole.OFFICIAL_SCOUT,
+        [manual_seed_tool_call(AgentRole.OFFICIAL_SCOUT), categorized_official_response("tech_finance")],
+    )
+    agent_runner = AgentRunner(
+        db_session,
+        role_registry=role_registry,
+        tool_registry=tool_registry,
+        model_factory=lambda _config: model,
+    )
+    daily_harness = DailyRunHarness(
+        db_session,
+        agent_runner=agent_runner,
+        config=HarnessConfig(min_selected_items=1),
+    )
+    fixture = run_state_fixture()
+    run = daily_harness.create_run(
+        run_id=RUN_ID,
+        report_date=fixture.report_date,
+        objective=fixture.objective,
+        budgets=RunBudgets(max_collect_rounds=1),
+    )
+
+    CollectLoopHarness(daily_harness.context).run(
+        run,
+        tasks_by_phase={
+            RunPhase.SCOUTING: [
+                ScoutTaskFactory().create_task(
+                    AgentRole.OFFICIAL_SCOUT,
+                    objective=fixture.objective,
+                )
+            ]
+        },
+    )
+
+    candidates = CandidateRepository(db_session).list_by_run(RUN_ID)
+    assert len(candidates) == 1
+    assert candidates[0].category == "official_update"
+    assert candidates[0].metadata["normalized_category_from"] == "tech_finance"
+
+
 def test_materializer_rejects_scout_output_that_violates_profile(db_session) -> None:
     tool_registry = create_default_tool_registry()
     role_registry = create_default_agent_role_registry(tool_registry)
@@ -310,7 +506,7 @@ def test_materializer_rejects_scout_output_that_violates_profile(db_session) -> 
         budgets=RunBudgets(max_collect_rounds=1),
     )
 
-    with pytest.raises(HarnessError, match="finance_scout cannot create category early_signal"):
+    with pytest.raises(HarnessError, match="finance_scout candidate drafts require tickers or potential_impact"):
         CollectLoopHarness(daily_harness.context).run(
             run,
             tasks_by_phase={

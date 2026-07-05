@@ -12,6 +12,7 @@ from app.domain import (
     EvaluationType,
     RunPhase,
     TraceEventType,
+    TraceStatus,
 )
 from app.evaluators.materialization import EvaluatorOutputMaterializer
 from app.exceptions import HarnessError
@@ -140,7 +141,7 @@ def test_invalid_evaluator_draft_raises_harness_error(db_session) -> None:
 
     materializer = EvaluatorOutputMaterializer(context)
 
-    with pytest.raises(HarnessError, match="select_confirmed cannot include missing_evidence"):
+    with pytest.raises(HarnessError, match="missing score dimensions: product_impact"):
         materializer.materialize(
             run=run,
             phase=RunPhase.EVALUATING,
@@ -154,15 +155,167 @@ def test_invalid_evaluator_draft_raises_harness_error(db_session) -> None:
                         "confirmation_strength": 10,
                         "impact_scale": 7,
                         "expectation_change": 6,
-                        "product_impact": 7,
                     },
                     total_score=7.5,
                     decision=EvaluationDecision.SELECT_CONFIRMED,
-                    reasoning_summary="Official source exists but this draft contradicts itself.",
-                    missing_evidence=["Still missing official source."],
+                    reasoning_summary="Official source exists but one required dimension is missing.",
                 ),
             ),
         )
+
+
+def test_evaluator_skips_cluster_category_owned_by_another_profile(db_session) -> None:
+    context = HarnessContext(db_session)
+    run = run_state_fixture()
+    context.runs.add(run)
+    event = _persist_bundle_without_evaluation(db_session, confirmed_event_bundle())
+
+    materializer = EvaluatorOutputMaterializer(context)
+    materialized = materializer.materialize(
+        run=run,
+        phase=RunPhase.EVALUATING,
+        agent_role=AgentRole.FRONTIER_EVALUATOR,
+        result=_result(
+            role=AgentRole.FRONTIER_EVALUATOR,
+            draft=EvaluationDraft(
+                cluster_id=event["cluster"].id,
+                evaluator_type=EvaluationType.FRONTIER,
+                dimension_scores={
+                    "information_gap": 8,
+                    "specificity": 7,
+                    "source_proximity": 4,
+                    "potential_impact": 8,
+                    "trackability": 9,
+                },
+                total_score=7.2,
+                decision=EvaluationDecision.FOLLOWUP_NOW,
+                reasoning_summary="This draft targets a cluster owned by Event Evaluator.",
+                required_followups=["Let event evaluator judge this cluster."],
+            ),
+        ),
+    )
+
+    evaluations = EvaluationRepository(db_session).list_by_run(RUN_ID)
+    timeline = TraceService(db_session).reconstruct_timeline(RUN_ID)
+
+    assert materialized.evaluation_ids == []
+    assert evaluations == []
+    assert timeline.events[-1].event_type == TraceEventType.AGENT_DECISION
+    assert timeline.events[-1].status == TraceStatus.SKIPPED
+    assert timeline.events[-1].metadata["skip_reason"] == "ineligible_cluster_category"
+
+
+def test_evaluator_normalizes_summed_or_percent_scores(db_session) -> None:
+    context = HarnessContext(db_session)
+    run = run_state_fixture()
+    context.runs.add(run)
+    early = _persist_bundle_without_evaluation(db_session, early_signal_bundle())
+
+    materializer = EvaluatorOutputMaterializer(context)
+    materializer.materialize(
+        run=run,
+        phase=RunPhase.EVALUATING,
+        agent_role=AgentRole.FRONTIER_EVALUATOR,
+        result=_result(
+            role=AgentRole.FRONTIER_EVALUATOR,
+            draft=EvaluationDraft(
+                cluster_id=early["cluster"].id,
+                evaluator_type=EvaluationType.FRONTIER,
+                dimension_scores={
+                    "information_gap": 80,
+                    "specificity": 70,
+                    "source_proximity": 40,
+                    "potential_impact": 80,
+                    "trackability": 90,
+                },
+                total_score=360,
+                decision=EvaluationDecision.SELECT_EARLY_SIGNAL,
+                reasoning_summary="The model used percent dimensions and summed total.",
+                required_followups=["Monitor official API changelog."],
+                missing_evidence=["No official confirmation."],
+            ),
+        ),
+    )
+
+    evaluations = EvaluationRepository(db_session).list_by_run(RUN_ID)
+    assert len(evaluations) == 1
+    assert evaluations[0].dimension_scores["information_gap"] == 8
+    assert evaluations[0].total_score == pytest.approx(7.2)
+    assert evaluations[0].metadata["normalized_total_score_from"] == 360
+    assert evaluations[0].metadata["normalized_dimension_scores_from"]["trackability"] == 90
+
+
+def test_evaluator_downgrades_low_score_confirmed_selection(db_session) -> None:
+    context = HarnessContext(db_session)
+    run = run_state_fixture()
+    context.runs.add(run)
+    event = _persist_bundle_without_evaluation(db_session, confirmed_event_bundle())
+
+    materializer = EvaluatorOutputMaterializer(context)
+    materializer.materialize(
+        run=run,
+        phase=RunPhase.EVALUATING,
+        agent_role=AgentRole.EVENT_EVALUATOR,
+        result=_result(
+            role=AgentRole.EVENT_EVALUATOR,
+            draft=EvaluationDraft(
+                cluster_id=event["cluster"].id,
+                evaluator_type=EvaluationType.EVENT,
+                dimension_scores={
+                    "confirmation_strength": 5,
+                    "impact_scale": 4,
+                    "expectation_change": 5,
+                    "product_impact": 5,
+                },
+                total_score=4.75,
+                decision=EvaluationDecision.SELECT_CONFIRMED,
+                reasoning_summary="The model selected confirmed despite a low score.",
+            ),
+        ),
+    )
+
+    evaluations = EvaluationRepository(db_session).list_by_run(RUN_ID)
+    assert len(evaluations) == 1
+    assert evaluations[0].decision == EvaluationDecision.FOLLOWUP_NOW
+    assert evaluations[0].required_followups
+    assert evaluations[0].metadata["normalized_decision_from"] == "select_confirmed"
+
+
+def test_evaluator_downgrades_confirmed_selection_with_missing_evidence(db_session) -> None:
+    context = HarnessContext(db_session)
+    run = run_state_fixture()
+    context.runs.add(run)
+    market = _persist_bundle_without_evaluation(db_session, tech_finance_bundle())
+
+    materializer = EvaluatorOutputMaterializer(context)
+    materializer.materialize(
+        run=run,
+        phase=RunPhase.EVALUATING,
+        agent_role=AgentRole.MARKET_EVALUATOR,
+        result=_result(
+            role=AgentRole.MARKET_EVALUATOR,
+            draft=EvaluationDraft(
+                cluster_id=market["cluster"].id,
+                evaluator_type=EvaluationType.MARKET,
+                dimension_scores={
+                    "ai_relevance": 9,
+                    "market_impact": 8,
+                    "supply_chain_impact": 8,
+                    "ticker_relevance": 9,
+                },
+                total_score=8.5,
+                decision=EvaluationDecision.SELECT_CONFIRMED,
+                reasoning_summary="The model selected confirmed while listing missing evidence.",
+                missing_evidence=["Need the latest segment-level disclosure."],
+            ),
+        ),
+    )
+
+    evaluations = EvaluationRepository(db_session).list_by_run(RUN_ID)
+    assert len(evaluations) == 1
+    assert evaluations[0].decision == EvaluationDecision.FOLLOWUP_NOW
+    assert evaluations[0].required_followups == ["Need the latest segment-level disclosure."]
+    assert "missing_evidence" in evaluations[0].metadata["normalized_decision_reason"]
 
 
 def _persist_bundle_without_evaluation(db_session, bundle: dict[str, object]) -> dict[str, object]:

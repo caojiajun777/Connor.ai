@@ -115,8 +115,6 @@ def create_default_tool_registry() -> ToolRegistry:
                 {
                     AgentRole.ORCHESTRATOR,
                     AgentRole.CODE_MODEL_SCOUT,
-                    AgentRole.RESEARCH_SCOUT,
-                    AgentRole.OFFICIAL_SCOUT,
                 }
             ),
             default_source_name="GitHub Search API",
@@ -135,8 +133,6 @@ def create_default_tool_registry() -> ToolRegistry:
                 {
                     AgentRole.ORCHESTRATOR,
                     AgentRole.CODE_MODEL_SCOUT,
-                    AgentRole.RESEARCH_SCOUT,
-                    AgentRole.OFFICIAL_SCOUT,
                 }
             ),
             default_source_name="GitHub Code Search API",
@@ -192,7 +188,6 @@ def create_default_tool_registry() -> ToolRegistry:
             allowed_agent_roles=frozenset(
                 {
                     AgentRole.ORCHESTRATOR,
-                    AgentRole.CODE_MODEL_SCOUT,
                     AgentRole.RESEARCH_SCOUT,
                 }
             ),
@@ -211,7 +206,6 @@ def create_default_tool_registry() -> ToolRegistry:
             allowed_agent_roles=frozenset(
                 {
                     AgentRole.ORCHESTRATOR,
-                    AgentRole.CODE_MODEL_SCOUT,
                     AgentRole.RESEARCH_SCOUT,
                 }
             ),

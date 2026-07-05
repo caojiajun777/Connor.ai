@@ -23,7 +23,7 @@ from app.repositories import (
 )
 from app.services import TraceService
 from app.writing import WritingOutputMaterializer
-from tests.domain.fixtures import RUN_ID, early_signal_bundle, run_state_fixture
+from tests.domain.fixtures import early_signal_bundle, run_state_fixture
 
 
 def test_writer_output_materializer_creates_report_artifacts(db_session) -> None:
@@ -51,6 +51,79 @@ def test_writer_output_materializer_creates_report_artifacts(db_session) -> None
 
     timeline = TraceService(db_session).reconstruct_timeline(run.id)
     assert TraceEventType.REPORT_DRAFTED in [event.event_type for event in timeline.events]
+
+
+def test_writer_materializer_normalizes_item_category_to_cluster_category(db_session) -> None:
+    run = _persist_run_and_bundle(db_session)
+    output = WriterOutput(
+        summary="Writer drafted report with mismatched category.",
+        report_drafts=[
+            _report_draft(
+                status_label="Unconfirmed gray rollout feedback",
+                category="research",
+            )
+        ],
+    )
+
+    result = WritingOutputMaterializer(HarnessContext(db_session)).materialize(
+        run=run,
+        phase=RunPhase.WRITING,
+        agent_role=AgentRole.WRITER,
+        result=_agent_result(run.id, RunPhase.WRITING, AgentRole.WRITER, output),
+    )
+
+    report = DailyReportRepository(db_session).require(result.report_ids[0])
+    assert report.sections[0].items[0].category == "early_signal"
+
+
+def test_writer_materializer_normalizes_watchlist_update_shape(db_session) -> None:
+    run = _persist_run_and_bundle(db_session)
+    output = WriterOutput(
+        summary="Writer drafted report with watchlist-item shaped updates.",
+        report_drafts=[
+            _report_draft(
+                status_label="Unconfirmed gray rollout feedback",
+                watchlist_updates=[
+                    {
+                        "watchlist_id": "watch_openai_reasoning",
+                        "status": "active",
+                        "priority": "high",
+                        "title": "OpenAI reasoning-control API watch",
+                        "thesis": "Community and code signals still need official confirmation.",
+                        "open_questions": ["Check OpenAI changelog."],
+                        "evidence_ids": [
+                            "ev_openai_hn_reasoning",
+                            "ev_openai_wrapper_commit",
+                        ],
+                    }
+                ],
+            )
+        ],
+    )
+
+    result = WritingOutputMaterializer(HarnessContext(db_session)).materialize(
+        run=run,
+        phase=RunPhase.WRITING,
+        agent_role=AgentRole.WRITER,
+        result=_agent_result(run.id, RunPhase.WRITING, AgentRole.WRITER, output),
+    )
+
+    report = DailyReportRepository(db_session).require(result.report_ids[0])
+    update = report.watchlist_updates[0]
+    assert update.watchlist_id == "watch_openai_reasoning"
+    assert update.topic == "OpenAI reasoning-control API watch"
+    assert update.current_status == "active"
+    assert update.new_developments == [
+        "Community and code signals still need official confirmation."
+    ]
+    assert update.next_watch == ["Check OpenAI changelog."]
+
+    timeline = TraceService(db_session).reconstruct_timeline(run.id)
+    assert any(
+        event.metadata.get("normalized_count") == 1
+        for event in timeline.events
+        if event.event_type == TraceEventType.AGENT_DECISION
+    )
 
 
 def test_reviewer_materializer_blocks_early_signal_fact_language(db_session) -> None:
@@ -219,15 +292,18 @@ def _report_draft(
     *,
     status_label: str,
     report_id: str | None = None,
+    category: str = "early_signal",
     core_information: str = (
         "Community discussion and third-party code suggest a possible "
         "new reasoning-control option."
     ),
+    watchlist_updates: list[dict] | None = None,
 ) -> ReportDraft:
     return ReportDraft(
         report_id=report_id,
         overview_judgments=["Early API-surface signal is specific but unconfirmed."],
         tomorrow_focus=["Check official changelog and SDK commits."],
+        watchlist_updates=watchlist_updates or [],
         sections=[
             ReportSectionDraft(
                 section_id="early_signals",
@@ -235,7 +311,7 @@ def _report_draft(
                 items=[
                     ReportItemDraft(
                         title="OpenAI suspected reasoning-control API test",
-                        category="early_signal",
+                        category=category,
                         status_label=status_label,
                         core_information=core_information,
                         why_it_matters=(

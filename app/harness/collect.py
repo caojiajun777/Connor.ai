@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from app.agents import AgentRunRequest
 from app.clusterer.materialization import ClusterOutputMaterializer
 from app.clusterer.tasks import ClusterTaskFactory
-from app.domain import AgentRole, RunPhase, RunState, RunStatus, TraceEventType, TraceStatus
+from app.domain import RunPhase, RunState, RunStatus, TraceEventType, TraceStatus
 from app.domain.base import utc_now
 from app.evaluators.materialization import EvaluatorOutputMaterializer
 from app.evaluators.tasks import EvaluatorTaskFactory

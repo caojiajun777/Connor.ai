@@ -1,7 +1,6 @@
 """Run ORM model."""
 
 from datetime import date
-from typing import Any
 
 from sqlalchemy import Date, String, Text
 from sqlalchemy.orm import Mapped, mapped_column

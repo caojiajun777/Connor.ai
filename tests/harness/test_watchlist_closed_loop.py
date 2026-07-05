@@ -12,7 +12,7 @@ from agentscope.model import ChatModelBase, ChatResponse
 from pydantic import BaseModel
 
 from app.agents import AgentRunner, create_default_agent_role_registry
-from app.domain import AgentRole, RunBudgets, RunPhase, TraceEventType
+from app.domain import RunBudgets, RunPhase, TraceEventType
 from app.harness import CollectLoopHarness, DailyRunHarness, HarnessConfig
 from app.repositories import IntelligenceThreadRepository, WatchlistRepository
 from app.services import TraceService

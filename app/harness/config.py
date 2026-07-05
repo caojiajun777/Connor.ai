@@ -13,7 +13,7 @@ class HarnessConfig(ConnorBaseModel):
     max_evaluator_tasks_per_round: int = Field(default=3, gt=0)
     max_watchlist_tasks_per_round: int = Field(default=1, gt=0)
     max_writing_revisions: int = Field(default=2, ge=0)
-    min_selected_items: int = Field(default=1, ge=0)
+    min_selected_items: int = Field(default=1, gt=0)
     manual_review_on_failure: bool = True
     archive_gate_snapshots: bool = True
     archive_loop_snapshots: bool = True

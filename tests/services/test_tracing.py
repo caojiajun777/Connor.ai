@@ -38,7 +38,7 @@ def test_trace_service_records_events_calls_and_reconstructs_timeline(db_session
         reasoning_summary="The signal was specific, relevant, and trackable.",
         metadata={"topic": "OpenAI reasoning API"},
     )
-    created = trace_service.object_created(
+    trace_service.object_created(
         run_id="run_2026_07_03",
         phase=RunPhase.SCOUTING,
         agent_role=AgentRole.SOCIAL_SCOUT,

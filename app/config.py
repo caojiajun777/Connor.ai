@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     huggingface_token: str | None = Field(default=None)
     tool_user_agent: str = Field(default="Connor.ai/0.1")
     sec_user_agent: str | None = Field(default=None)
+    # DeepSeek model provider
+    deepseek_api_key: str | None = Field(default=None)
+    deepseek_model: str = Field(default="deepseek-chat")
+    deepseek_base_url: str = Field(default="https://api.deepseek.com")
 
 
 @lru_cache

@@ -75,7 +75,11 @@ class ScoutProfile:
         if self.required_followup_questions and not draft.followup_questions:
             raise ScoutProfileError(f"{self.role.value} candidate drafts require followup_questions")
 
-        if self.required_evidence_strengths and draft.evidence_strength not in self.required_evidence_strengths:
+        if (
+            self.required_evidence_strengths
+            and draft.signal_status != SignalStatus.MANUAL_HYPOTHESIS
+            and draft.evidence_strength not in self.required_evidence_strengths
+        ):
             allowed = ", ".join(sorted(str(item.value) for item in self.required_evidence_strengths))
             raise ScoutProfileError(
                 f"{self.role.value} requires evidence_strength in {{{allowed}}}"
@@ -253,6 +257,7 @@ def create_default_scout_profile_registry() -> ScoutProfileRegistry:
                         SignalStatus.OFFICIAL_CONFIRMATION,
                         SignalStatus.CONFIRMED_FACT,
                         SignalStatus.NOT_APPLICABLE,
+                        SignalStatus.MANUAL_HYPOTHESIS,
                     }
                 ),
                 required_followup_questions=True,
@@ -286,6 +291,7 @@ def create_default_scout_profile_registry() -> ScoutProfileRegistry:
                         SignalStatus.NOT_APPLICABLE,
                         SignalStatus.CONFIRMED_FACT,
                         SignalStatus.SINGLE_SOURCE_SIGNAL,
+                        SignalStatus.MANUAL_HYPOTHESIS,
                     }
                 ),
                 required_followup_questions=True,

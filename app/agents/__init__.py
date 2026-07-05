@@ -25,6 +25,7 @@ from app.agents.outputs import (
     WatchlistDraft,
     WriterOutput,
 )
+from app.agents.model_factory import create_deepseek_model_factory
 from app.agents.registry import AgentRoleRegistry, create_default_agent_role_registry
 from app.agents.runner import AgentRunner, AgentScopeModelFactory
 from app.agents.schemas import (
@@ -65,5 +66,6 @@ __all__ = [
     "WatchlistAgentOutput",
     "WatchlistDraft",
     "WriterOutput",
+    "create_deepseek_model_factory",
     "create_default_agent_role_registry",
 ]

@@ -4,7 +4,6 @@ import hashlib
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
 
 from app.domain import ArtifactKind, ArtifactStorage
 from app.repositories import RunRepository
