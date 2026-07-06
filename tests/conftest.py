@@ -9,6 +9,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from app.db.base import Base
 from app.db import models  # noqa: F401
@@ -16,7 +17,12 @@ from app.db import models  # noqa: F401
 
 @pytest.fixture()
 def db_session() -> Session:
-    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+        future=True,
+    )
     Base.metadata.create_all(engine)
     SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
     with SessionLocal() as session:

@@ -5,7 +5,7 @@ from typing import Any
 from pydantic import Field, field_validator, model_validator
 
 from app.domain.base import DomainModel, NonEmptyStr, Score
-from app.domain.enums import AgentRole, EvaluationDecision, EvaluationType
+from app.domain.enums import AgentRole, EvaluationDecision, EvaluationType, WritePolicy
 
 
 class EvaluationResult(DomainModel):
@@ -22,6 +22,7 @@ class EvaluationResult(DomainModel):
     risk_flags: list[str] = Field(default_factory=list)
     required_followups: list[str] = Field(default_factory=list)
     missing_evidence: list[str] = Field(default_factory=list)
+    write_policy: WritePolicy | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("dimension_scores")

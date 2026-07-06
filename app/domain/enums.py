@@ -150,6 +150,16 @@ class EvaluationDecision(StrEnum):
     REJECT = "reject"
 
 
+class WritePolicy(StrEnum):
+    """Calibrated write policy derived from evaluator decisions and scores."""
+
+    WRITE_NOW = "write_now"
+    WRITE_WITH_CAVEAT = "write_with_caveat"
+    ARCHIVE = "archive"
+    DO_NOT_WRITE = "do_not_write"
+    CONTEXT_ONLY = "context_only"
+
+
 class WatchTier(StrEnum):
     SHORT = "short"
     EVENT = "event"

@@ -139,8 +139,55 @@ class ToolExecutor:
             access_level=spec.default_access_level,
             strength=spec.default_evidence_strength,
         )
-        self.evidence_repository.add_many(evidence_items)
-        return evidence_items
+        existing_urls = self.evidence_repository.list_urls_in_run(context.run_id)
+        # Normalize existing URLs for consistent comparison
+        normalized_existing = set()
+        for raw_url in existing_urls:
+            normalized = ToolExecutor._normalize_url(raw_url)
+            if normalized:
+                normalized_existing.add(normalized)
+        deduped: list[EvidenceItem] = []
+        skipped_count = 0
+        for item in evidence_items:
+            normalized = ToolExecutor._normalize_url(item.url)
+            if normalized and normalized in normalized_existing:
+                skipped_count += 1
+                continue
+            if normalized:
+                normalized_existing.add(normalized)
+            deduped.append(item)
+
+        if skipped_count > 0 and self.trace_service is not None:
+            self.trace_service.record_event(
+                run_id=context.run_id,
+                phase=context.phase,
+                agent_role=context.agent_role,
+                event_type=TraceEventType.AGENT_DECISION,
+                summary=f"Evidence URL dedup skipped {skipped_count} duplicate item(s) for tool {spec.name}.",
+                metadata={
+                    "skipped_count": skipped_count,
+                    "tool_name": spec.name,
+                    "kept_count": len(deduped),
+                    "dedup_strategy": "url_normalized",
+                },
+            )
+
+        self.evidence_repository.add_many(deduped)
+        return deduped
+
+    @staticmethod
+    def _normalize_url(url: str | None) -> str | None:
+        """Normalize a URL for dedup comparison: lowercase scheme+host, strip trailing slash."""
+        if not url:
+            return None
+        normalized = url.strip()
+        if normalized.startswith("http://"):
+            normalized = "https://" + normalized[len("http://"):]
+        normalized = normalized.rstrip("/")
+        # Also strip www. for consistency
+        if "://www." in normalized:
+            normalized = normalized.replace("://www.", "://")
+        return normalized
 
     @staticmethod
     def _validate_envelope(spec: ToolSpec, raw_result: ToolEnvelope | dict[str, Any]) -> ToolEnvelope:
@@ -156,6 +203,15 @@ class ToolExecutor:
     @staticmethod
     def _status_for_envelope(envelope: ToolEnvelope) -> ToolCallStatus:
         if envelope.errors and not envelope.items:
+            error_codes = {e.code for e in envelope.errors}
+            if any("timeout" in code.lower() for code in error_codes):
+                return ToolCallStatus.TIMEOUT
+            if any(
+                keyword in code.lower()
+                for code in error_codes
+                for keyword in ("rate", "429", "throttl")
+            ):
+                return ToolCallStatus.RATE_LIMITED
             return ToolCallStatus.FAILED
         return ToolCallStatus.SUCCEEDED
 
@@ -168,10 +224,11 @@ class ToolExecutor:
     @staticmethod
     def _error_envelope(spec: ToolSpec, context: ToolExecutionContext, exc: Exception) -> ToolEnvelope:
         error_code = "validation_error" if isinstance(exc, ValidationError) else "tool_execution_error"
+        safe_query = context.query or spec.name
         return ToolEnvelope(
             tool_name=spec.name,
             source_type=spec.source_type,
-            query=context.query,
+            query=safe_query,
             retrieved_at=utc_now(),
             errors=[
                 ToolError(

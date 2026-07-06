@@ -38,6 +38,7 @@ from app.domain.enums import (
     TraceStatus,
     WatchStatus,
     WatchTier,
+    WritePolicy,
 )
 from app.domain.evaluation import EvaluationResult
 from app.domain.evidence import EvidenceItem
@@ -117,6 +118,7 @@ __all__ = [
     "WatchTier",
     "WatchlistItem",
     "WatchlistUpdate",
+    "WritePolicy",
     "utc_now",
 ]
 

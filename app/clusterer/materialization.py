@@ -22,6 +22,7 @@ from app.domain import (
     RunPhase,
     RunState,
     TraceEventType,
+    TraceStatus,
 )
 from app.domain.base import utc_now
 from app.services import TraceService
@@ -93,7 +94,23 @@ class ClusterOutputMaterializer:
 
         materialized = ClusterMaterializationResult()
         for draft in result.structured_output.cluster_drafts:
-            cluster = self._create_or_merge_cluster(run=run, draft=draft)
+            draft = self._repair_draft_candidate_ids(run.id, draft)
+            if draft is None:
+                self.context.trace_service.record_event(
+                    run_id=run.id,
+                    phase=phase,
+                    agent_role=AgentRole.CLUSTERER,
+                    event_type=TraceEventType.AGENT_DECISION,
+                    status=TraceStatus.FAILED,
+                    summary="Clusterer draft skipped because candidate lineage could not be repaired.",
+                    error="Clusterer draft candidate_ids did not resolve to run candidates.",
+                    metadata={
+                        "materialized_by": "ClusterOutputMaterializer",
+                        "skipped": True,
+                    },
+                )
+                continue
+            cluster = self._create_or_merge_cluster(run=run, phase=phase, draft=draft)
             self.clusters.add(cluster)
             materialized.cluster_ids.append(cluster.id)
             self.context.trace_service.object_created(
@@ -122,11 +139,111 @@ class ClusterOutputMaterializer:
         self.context.session.flush()
         return materialized
 
-    def _create_or_merge_cluster(self, *, run: RunState, draft: ClusterDraft) -> EventCluster:
+    def _repair_draft_candidate_ids(
+        self,
+        run_id: str,
+        draft: ClusterDraft,
+    ) -> ClusterDraft | None:
+        valid_candidates: list[CandidateItem] = []
+        missing_candidate_ids: list[str] = []
+        wrong_run_candidate_ids: list[str] = []
+        for candidate_id in draft.candidate_ids:
+            candidate = self.candidates.get(candidate_id)
+            if candidate is None:
+                missing_candidate_ids.append(candidate_id)
+                continue
+            if candidate.run_id != run_id:
+                wrong_run_candidate_ids.append(candidate_id)
+                continue
+            valid_candidates.append(candidate)
+
+        if valid_candidates:
+            if not missing_candidate_ids and not wrong_run_candidate_ids:
+                return draft
+            valid_candidate_ids = [candidate.id for candidate in valid_candidates]
+            return draft.model_copy(
+                update={
+                    "candidate_ids": valid_candidate_ids,
+                    "metadata": {
+                        **draft.metadata,
+                        "repaired_candidate_ids": True,
+                        "requested_candidate_ids": draft.candidate_ids,
+                        "missing_candidate_ids": missing_candidate_ids,
+                        "wrong_run_candidate_ids": wrong_run_candidate_ids,
+                    },
+                }
+            )
+
+        fallback_candidates = self._fallback_candidates_for_draft(run_id, draft)
+        if not fallback_candidates:
+            return None
+        return draft.model_copy(
+            update={
+                "candidate_ids": [candidate.id for candidate in fallback_candidates],
+                "metadata": {
+                    **draft.metadata,
+                    "repaired_candidate_ids": True,
+                    "requested_candidate_ids": draft.candidate_ids,
+                    "missing_candidate_ids": missing_candidate_ids,
+                    "wrong_run_candidate_ids": wrong_run_candidate_ids,
+                    "fallback_candidate_ids_from_run": True,
+                },
+            }
+        )
+
+    def _fallback_candidates_for_draft(
+        self,
+        run_id: str,
+        draft: ClusterDraft,
+    ) -> list[CandidateItem]:
+        run_candidates = self.candidates.list_by_run(run_id)
+        if not run_candidates:
+            return []
+
+        draft_evidence_ids = set(draft.evidence_ids)
+        if draft_evidence_ids:
+            evidence_matches = [
+                candidate
+                for candidate in run_candidates
+                if draft_evidence_ids.intersection(candidate.evidence_ids)
+            ]
+            if evidence_matches:
+                return evidence_matches[:6]
+
+        category_matches = [
+            candidate for candidate in run_candidates if candidate.category == draft.category
+        ]
+        if category_matches:
+            return category_matches[:6]
+
+        return run_candidates[:1]
+
+    def _create_or_merge_cluster(
+        self,
+        *,
+        run: RunState,
+        phase: RunPhase,
+        draft: ClusterDraft,
+    ) -> EventCluster:
         candidates = self._candidate_map(run.id, draft.candidate_ids)
-        evidence_ids = self._evidence_ids(draft, candidates)
-        for evidence_id in evidence_ids:
-            self.evidence.require(evidence_id)
+        evidence_ids, evidence_repair_metadata = self._evidence_ids(run.id, draft, candidates)
+        if evidence_repair_metadata:
+            self.context.trace_service.record_event(
+                run_id=run.id,
+                phase=phase,
+                agent_role=AgentRole.CLUSTERER,
+                event_type=TraceEventType.AGENT_DECISION,
+                status=TraceStatus.SUCCEEDED,
+                summary="Clusterer draft evidence lineage was repaired before materialization.",
+                reasoning_summary=(
+                    "The draft referenced missing or invalid evidence IDs; "
+                    "materialization kept only verified run evidence and candidate lineage."
+                ),
+                metadata={
+                    "materialized_by": "ClusterOutputMaterializer",
+                    **evidence_repair_metadata,
+                },
+            )
 
         dedupe_key = draft.dedupe_key or self._dedupe_key(draft, candidates)
         existing = self.clusters.get_by_dedupe_key(dedupe_key)
@@ -134,6 +251,7 @@ class ClusterOutputMaterializer:
             **draft.metadata,
             "materialized_by": "ClusterOutputMaterializer",
             "clusterer_version": "phase9",
+            **evidence_repair_metadata,
             **self._link_metadata(candidates),
         }
 
@@ -195,19 +313,48 @@ class ClusterOutputMaterializer:
             candidates[candidate_id] = candidate
         return candidates
 
-    @staticmethod
-    def _evidence_ids(draft: ClusterDraft, candidates: dict[str, CandidateItem]) -> list[str]:
-        evidence_ids = list(draft.evidence_ids)
-        if not evidence_ids:
-            for candidate in candidates.values():
-                evidence_ids.extend(candidate.evidence_ids)
-        else:
-            for candidate in candidates.values():
-                evidence_ids.extend(candidate.evidence_ids)
-        evidence_ids = ClusterOutputMaterializer._dedupe(evidence_ids)
-        if not evidence_ids:
+    def _evidence_ids(
+        self,
+        run_id: str,
+        draft: ClusterDraft,
+        candidates: dict[str, CandidateItem],
+    ) -> tuple[list[str], dict[str, object]]:
+        requested_evidence_ids = self._dedupe(list(draft.evidence_ids))
+        candidate_evidence_ids = self._dedupe(
+            [
+                evidence_id
+                for candidate in candidates.values()
+                for evidence_id in candidate.evidence_ids
+            ]
+        )
+        evidence_ids = self._dedupe(requested_evidence_ids + candidate_evidence_ids)
+        valid_evidence_ids: list[str] = []
+        missing_evidence_ids: list[str] = []
+        wrong_run_evidence_ids: list[str] = []
+        for evidence_id in evidence_ids:
+            evidence = self.evidence.get(evidence_id)
+            if evidence is None:
+                missing_evidence_ids.append(evidence_id)
+                continue
+            if evidence.run_id != run_id:
+                wrong_run_evidence_ids.append(evidence_id)
+                continue
+            valid_evidence_ids.append(evidence_id)
+
+        valid_evidence_ids = self._dedupe(valid_evidence_ids)
+        if not valid_evidence_ids:
             raise HarnessError("cluster drafts require evidence_ids or candidate evidence")
-        return evidence_ids
+
+        repair_metadata: dict[str, object] = {}
+        if missing_evidence_ids or wrong_run_evidence_ids or valid_evidence_ids != evidence_ids:
+            repair_metadata = {
+                "repaired_evidence_ids": True,
+                "requested_evidence_ids": requested_evidence_ids,
+                "candidate_evidence_ids": candidate_evidence_ids,
+                "missing_evidence_ids": missing_evidence_ids,
+                "wrong_run_evidence_ids": wrong_run_evidence_ids,
+            }
+        return valid_evidence_ids, repair_metadata
 
     def _timeline_entries(
         self,
@@ -215,11 +362,21 @@ class ClusterOutputMaterializer:
         evidence_ids: list[str],
     ) -> list[ClusterTimelineEntry]:
         if draft.timeline:
+            valid_evidence_id_set = set(evidence_ids)
             return [
                 ClusterTimelineEntry(
                     observed_at=utc_now(),
                     summary=entry.summary,
-                    evidence_ids=entry.evidence_ids or evidence_ids,
+                    evidence_ids=(
+                        self._dedupe(
+                            [
+                                evidence_id
+                                for evidence_id in entry.evidence_ids
+                                if evidence_id in valid_evidence_id_set
+                            ]
+                        )
+                        or evidence_ids
+                    ),
                     candidate_ids=entry.candidate_ids or draft.candidate_ids,
                 )
                 for entry in draft.timeline

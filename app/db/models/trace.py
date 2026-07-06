@@ -1,6 +1,6 @@
 """Trace event ORM model."""
 
-from sqlalchemy import ForeignKey, String, Text
+from sqlalchemy import ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -9,6 +9,9 @@ from app.db.models.mixins import DomainPayloadMixin
 
 class TraceEventRecord(DomainPayloadMixin, Base):
     __tablename__ = "trace_events"
+    __table_args__ = (
+        UniqueConstraint("run_id", "seq", name="uq_trace_events_run_seq"),
+    )
 
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), index=True)
     parent_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)

@@ -71,7 +71,7 @@ class ConnorBaseModel(BaseModel):
     """Strict base model for all Connor.ai domain objects."""
 
     model_config = ConfigDict(
-        extra="forbid",
+        extra="ignore",
         populate_by_name=True,
         use_enum_values=False,
         validate_assignment=True,

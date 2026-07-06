@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from agentscope.message import TextBlock, ToolResultState
@@ -43,6 +46,9 @@ class AgentScopeToolBridge:
         self.agent_role = agent_role
         self.max_tool_calls = max_tool_calls
         self.executed_results: list[ToolExecutionResult] = []
+        self._execution_lock = threading.Lock()
+        self._executor_lock = threading.Lock()
+        self._executor: ThreadPoolExecutor | None = None
 
     def create_toolkit(self, allowed_tool_names: list[str]) -> Toolkit:
         """Create an AgentScope Toolkit containing only role-allowed tools."""
@@ -66,21 +72,62 @@ class AgentScopeToolBridge:
     def agent_visible_tool_results(self) -> list[dict[str, Any]]:
         """Return executed tool results in the same compact form shown to agents."""
 
-        return [self._agent_visible_payload(result) for result in self.executed_results]
+        return [self._agent_visible_payload(result) for result in self.executed_results_snapshot()]
 
     def executed_evidence_ids(self) -> list[str]:
         """Return evidence IDs created by successful tool executions."""
 
         return [
             item.id
-            for result in self.executed_results
+            for result in self.executed_results_snapshot()
             for item in result.evidence_items
         ]
 
+    def executed_result_count(self) -> int:
+        """Return the number of completed Connor tool executions."""
+
+        with self._execution_lock:
+            return len(self.executed_results)
+
+    def executed_results_snapshot(self) -> list[ToolExecutionResult]:
+        """Return a thread-safe snapshot of completed Connor tool results."""
+
+        with self._execution_lock:
+            return list(self.executed_results)
+
+    async def aclose(self) -> None:
+        """Shut down the bridge's tool worker without blocking the event loop."""
+
+        executor = self._pop_executor()
+        if executor is None:
+            return
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, executor.shutdown, True)
+
     def _create_connor_tool(self, tool_name: str):
-        def connor_tool(query: str, params: dict[str, Any] | None = None) -> ToolChunk:
+        async def connor_tool(query: str, params: dict[str, Any] | None = None) -> ToolChunk:
             """Execute a Connor.ai tool and return traceable evidence IDs."""
 
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                self._get_executor(),
+                self._execute_connor_tool_sync,
+                tool_name,
+                query,
+                params or {},
+            )
+
+        return connor_tool
+
+    def _execute_connor_tool_sync(
+        self,
+        tool_name: str,
+        query: str,
+        params: dict[str, Any],
+    ) -> ToolChunk:
+        """Run synchronous Connor tool I/O in the bridge's single worker thread."""
+
+        with self._execution_lock:
             if self.max_tool_calls is not None and len(self.executed_results) >= self.max_tool_calls:
                 return self._tool_budget_exceeded_chunk(tool_name)
 
@@ -91,29 +138,43 @@ class AgentScopeToolBridge:
                     phase=self.phase,
                     agent_role=self.agent_role,
                     query=query,
-                    params=params or {},
+                    params=params,
                 ),
             )
             self.executed_results.append(result)
-            state = (
-                ToolResultState.SUCCESS
-                if result.tool_call.status == ToolCallStatus.SUCCEEDED
-                else ToolResultState.ERROR
-            )
-            return ToolChunk(
-                content=[
-                    TextBlock(
-                        text=json.dumps(
-                            self._agent_visible_payload(result),
-                            ensure_ascii=False,
-                            sort_keys=True,
-                        )
-                    )
-                ],
-                state=state,
-            )
 
-        return connor_tool
+        state = (
+            ToolResultState.SUCCESS
+            if result.tool_call.status == ToolCallStatus.SUCCEEDED
+            else ToolResultState.ERROR
+        )
+        return ToolChunk(
+            content=[
+                TextBlock(
+                    text=json.dumps(
+                        self._agent_visible_payload(result),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                )
+            ],
+            state=state,
+        )
+
+    def _get_executor(self) -> ThreadPoolExecutor:
+        with self._executor_lock:
+            if self._executor is None:
+                self._executor = ThreadPoolExecutor(
+                    max_workers=1,
+                    thread_name_prefix=f"connor-tool-{self.agent_role.value}",
+                )
+            return self._executor
+
+    def _pop_executor(self) -> ThreadPoolExecutor | None:
+        with self._executor_lock:
+            executor = self._executor
+            self._executor = None
+            return executor
 
     def _tool_budget_exceeded_chunk(self, tool_name: str) -> ToolChunk:
         message = (

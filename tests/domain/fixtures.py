@@ -489,6 +489,10 @@ def daily_report_fixture() -> DailyReport:
         full_markdown="# Connor.ai Daily Intelligence\n\n## Early Signals\n...",
         full_json={
             "report_date": "2026-07-03",
+            "tomorrow_focus": [
+                "Check official API docs and SDK commits.",
+                "Watch AI data-center capex and supplier commentary.",
+            ],
             "sections": [
                 {"section_id": "early_signals", "items": [early_item.model_dump(mode="json")]},
                 {"section_id": "tech_finance", "items": [finance_item.model_dump(mode="json")]},
@@ -543,4 +547,3 @@ def tool_envelope_fixture() -> ToolEnvelope:
             )
         ],
     )
-

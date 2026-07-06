@@ -17,4 +17,5 @@ class EvaluationResultRecord(DomainPayloadMixin, Base):
     total_score: Mapped[float] = mapped_column(nullable=False, index=True)
     decision: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     reasoning_summary: Mapped[str] = mapped_column(Text, nullable=False)
+    write_policy: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
 

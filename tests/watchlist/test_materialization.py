@@ -127,6 +127,46 @@ def test_archive_draft_archives_existing_watch_item(db_session) -> None:
     assert TraceEventType.THREAD_UPDATED in [event.event_type for event in timeline.events]
 
 
+def test_invalid_archive_draft_is_skipped_and_traced(db_session) -> None:
+    context = HarnessContext(db_session)
+    run = run_state_fixture()
+    context.runs.add(run)
+
+    result = AgentRunResult(
+        run_id=RUN_ID,
+        phase=RunPhase.WATCHLIST_UPDATE,
+        agent_role=AgentRole.WATCHLIST_AGENT,
+        structured_output=WatchlistAgentOutput(
+            summary="Watchlist Agent hallucinated one archive cluster id.",
+            archive_drafts=[
+                ArchiveDraft(
+                    archive_id="arch_missing_cluster",
+                    original_cluster_id="cl_missing",
+                    archive_reason=ArchiveReason.NO_NEW_SIGNAL,
+                    final_state="No usable signal remains.",
+                )
+            ],
+        ),
+    )
+
+    materialized = WatchlistOutputMaterializer(context).materialize(
+        run=run,
+        phase=RunPhase.WATCHLIST_UPDATE,
+        agent_role=AgentRole.WATCHLIST_AGENT,
+        result=result,
+    )
+
+    timeline = TraceService(db_session).reconstruct_timeline(RUN_ID)
+    skipped = [
+        event
+        for event in timeline.events
+        if event.metadata.get("skipped") and event.metadata.get("draft_type") == "archive"
+    ]
+    assert materialized.archive_ids == []
+    assert skipped
+    assert "EventClusterRecord not found: cl_missing" in skipped[0].error
+
+
 def test_watchlist_materializer_clamps_ttl_to_tier_window(db_session) -> None:
     context = HarnessContext(db_session)
     run = run_state_fixture()

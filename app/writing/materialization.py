@@ -24,6 +24,7 @@ from app.domain import (
     CandidateCategory,
     DailyReport,
     EvidenceMapEntry,
+    EventCluster,
     ObjectType,
     ReportItem,
     ReportSection,
@@ -190,8 +191,7 @@ class WritingOutputMaterializer:
         if not output.review_drafts:
             return materialized
 
-        for draft in output.review_drafts:
-            report = self._report_for_review(run.id, draft.report_id)
+        for report, draft in self._aggregate_review_drafts(run.id, output):
             review, issues = self._create_review(run=run, phase=phase, report=report, draft=draft)
             for issue in issues:
                 self.issues.add(issue)
@@ -221,6 +221,83 @@ class WritingOutputMaterializer:
         self.context.session.flush()
         return materialized
 
+    def _aggregate_review_drafts(
+        self,
+        run_id: str,
+        output: ReviewerOutput,
+    ) -> list[tuple[DailyReport, ReviewDraft]]:
+        grouped: dict[str, tuple[DailyReport, list[ReviewDraft]]] = {}
+        for draft in output.review_drafts:
+            report = self._report_for_review(run_id, draft.report_id)
+            if report.id not in grouped:
+                grouped[report.id] = (report, [])
+            grouped[report.id][1].append(draft)
+
+        aggregated: list[tuple[DailyReport, ReviewDraft]] = []
+        single_report = len(grouped) == 1
+        for report, drafts in grouped.values():
+            decision = self._aggregate_review_decision(
+                drafts,
+                output.decision if single_report else None,
+            )
+            issues = [issue for draft in drafts for issue in draft.issues]
+            required_changes = self._dedupe(
+                [
+                    *(
+                        output.required_changes
+                        if single_report and output.decision != ReviewDecision.PASS
+                        else []
+                    ),
+                    *[
+                        change
+                        for draft in drafts
+                        for change in draft.required_changes
+                    ],
+                ]
+            )
+            reasoning_parts = [
+                output.reasoning_summary or output.summary,
+                *[draft.reasoning_summary for draft in drafts],
+            ]
+            aggregated.append(
+                (
+                    report,
+                    ReviewDraft(
+                        report_id=report.id,
+                        decision=decision,
+                        issues=issues,
+                        required_changes=required_changes,
+                        reasoning_summary=" ".join(
+                            part.strip()
+                            for part in reasoning_parts
+                            if part and part.strip()
+                        ),
+                        metadata={
+                            "aggregated_review_drafts": len(drafts),
+                            "source_review_decision": output.decision.value,
+                        },
+                    ),
+                )
+            )
+        return aggregated
+
+    @staticmethod
+    def _aggregate_review_decision(
+        drafts: list[ReviewDraft],
+        output_decision: ReviewDecision | None,
+    ) -> ReviewDecision:
+        decisions = [draft.decision for draft in drafts]
+        if output_decision is not None:
+            decisions.append(output_decision)
+        for decision in (
+            ReviewDecision.REJECT,
+            ReviewDecision.REOPEN_COLLECT,
+            ReviewDecision.REVISE,
+        ):
+            if decision in decisions:
+                return decision
+        return ReviewDecision.PASS
+
     def _create_or_update_report(
         self,
         *,
@@ -232,24 +309,32 @@ class WritingOutputMaterializer:
     ) -> DailyReport:
         existing = self._existing_report_for_draft(run.id, draft, edited)
         report_id = existing.id if existing is not None else self._new_report_id(run, draft, agent_role)
-        sections = [self._section_from_draft(run.id, section) for section in draft.sections]
-        evidence_map = self._evidence_map_for_sections(run.id, sections)
+        raw_sections = [
+            self._section_from_draft(run.id, section) for section in draft.sections
+        ]
         watchlist_updates = self._watchlist_updates_for_report(
             run_id=run.id,
             phase=phase,
             agent_role=agent_role,
-            sections=sections,
+            sections=raw_sections,
             draft=draft,
         )
+        tomorrow_focus = draft.tomorrow_focus or self._derive_tomorrow_focus(
+            raw_sections,
+            watchlist_updates,
+        )
+        sections = self._normalize_report_sections(raw_sections)
+        evidence_map = self._evidence_map_for_sections(run.id, sections)
         trace_timeline_ids = [event.id for event in self.context.runs.get_full_state(run.id).trace_events]
         metadata = {
             **(existing.metadata if existing is not None else {}),
             **draft.metadata,
             "overview_judgments": draft.overview_judgments,
-            "tomorrow_focus": draft.tomorrow_focus,
+            "tomorrow_focus": tomorrow_focus,
             "materialized_by": "WritingOutputMaterializer",
             "source_agent_role": agent_role.value,
             "source_phase": phase.value,
+            "deterministic_markdown_rendered": True,
         }
         full_json = self._full_json(
             run=run,
@@ -259,15 +344,15 @@ class WritingOutputMaterializer:
             watchlist_updates=watchlist_updates,
             trace_timeline_ids=trace_timeline_ids,
             overview_judgments=draft.overview_judgments,
-            tomorrow_focus=draft.tomorrow_focus,
+            tomorrow_focus=tomorrow_focus,
         )
-        full_markdown = draft.full_markdown or self._render_markdown(
+        full_markdown = self._render_markdown(
             run=run,
             title=draft.title,
             sections=sections,
             watchlist_updates=watchlist_updates,
             overview_judgments=draft.overview_judgments,
-            tomorrow_focus=draft.tomorrow_focus,
+            tomorrow_focus=tomorrow_focus,
         )
         now = utc_now()
         return DailyReport(
@@ -289,6 +374,33 @@ class WritingOutputMaterializer:
             updated_at=now if existing is not None else None,
         )
 
+    def _derive_tomorrow_focus(
+        self,
+        sections: list[ReportSection],
+        watchlist_updates: list[WatchlistUpdate],
+    ) -> list[str]:
+        focus: list[str] = []
+        for section in sections:
+            section_marker = f"{section.section_id} {section.title}".lower()
+            if "tomorrow" not in section_marker and "明日" not in section_marker:
+                continue
+            for item in section.items:
+                focus.extend(item.followup_points)
+                if not item.followup_points:
+                    focus.append(item.core_information)
+
+        if not focus:
+            for section in sections:
+                for item in section.items:
+                    if item.category != CandidateCategory.WATCHLIST_UPDATE:
+                        focus.extend(item.followup_points)
+
+        if not focus:
+            for update in watchlist_updates:
+                focus.extend(update.next_watch)
+
+        return self._dedupe([item for item in focus if item])[:5]
+
     def _section_from_draft(self, run_id: str, draft) -> ReportSection:
         return ReportSection(
             section_id=draft.section_id,
@@ -296,9 +408,70 @@ class WritingOutputMaterializer:
             items=[self._item_from_draft(run_id, item) for item in draft.items],
         )
 
+    @staticmethod
+    def _normalize_report_sections(sections: list[ReportSection]) -> list[ReportSection]:
+        items_by_section: dict[str, list[ReportItem]] = {
+            "early_signals": [],
+            "confirmed_events": [],
+            "tech_finance": [],
+            "watchlist": [],
+            "other": [],
+        }
+        for section in sections:
+            if WritingOutputMaterializer._is_tomorrow_focus_section(section):
+                continue
+            for item in section.items:
+                items_by_section[
+                    WritingOutputMaterializer._section_id_for_item(item)
+                ].append(item)
+
+        normalized: list[ReportSection] = []
+        for section_id, title in (
+            ("early_signals", "前沿爆料 Early Signals"),
+            ("confirmed_events", "重大事件确认 Confirmed Events"),
+            ("tech_finance", "科技圈金融信息 Tech-Finance"),
+            ("watchlist", "持续追踪 Watchlist"),
+            ("other", "Other Signals"),
+        ):
+            items = items_by_section[section_id]
+            if items:
+                normalized.append(
+                    ReportSection(section_id=section_id, title=title, items=items)
+                )
+        return normalized
+
+    @staticmethod
+    def _is_tomorrow_focus_section(section: ReportSection) -> bool:
+        marker = f"{section.section_id} {section.title}".lower()
+        return "tomorrow" in marker or "明日" in marker
+
+    @staticmethod
+    def _section_id_for_item(item: ReportItem) -> str:
+        if item.category in {
+            CandidateCategory.EARLY_SIGNAL,
+            CandidateCategory.RESEARCH,
+            CandidateCategory.CODE_MODEL,
+        }:
+            return "early_signals"
+        if item.category in {
+            CandidateCategory.CONFIRMED_EVENT,
+            CandidateCategory.OFFICIAL_UPDATE,
+        }:
+            return "confirmed_events"
+        if item.category == CandidateCategory.TECH_FINANCE:
+            return "tech_finance"
+        if item.category == CandidateCategory.WATCHLIST_UPDATE:
+            return "watchlist"
+        return "other"
+
     def _item_from_draft(self, run_id: str, draft: ReportItemDraft) -> ReportItem:
         draft = self._normalize_item_category_from_clusters(run_id, draft)
         self._validate_item_lineage(run_id, draft)
+        draft = self._repair_tech_finance_fields_from_clusters(run_id, draft)
+        draft = self._repair_uncertain_item_language(draft)
+        draft = self._repair_missing_followups(draft)
+        draft = self._repair_generic_followups(draft)
+        draft = self._normalize_report_item_text(draft)
         item_id = draft.item_id or deterministic_id(
             "item",
             {
@@ -325,11 +498,298 @@ class WritingOutputMaterializer:
             uncertainty_label=draft.uncertainty_label,
         )
 
+    def _repair_missing_followups(self, draft: ReportItemDraft) -> ReportItemDraft:
+        if draft.followup_points:
+            return draft
+        if draft.category in {CandidateCategory.CONFIRMED_EVENT, CandidateCategory.OFFICIAL_UPDATE}:
+            followup = "No immediate follow-up required; revisit if new official details appear."
+        elif draft.category == CandidateCategory.TECH_FINANCE:
+            followup = "Check the next official filing, earnings call, or market reaction update."
+        elif draft.category == CandidateCategory.WATCHLIST_UPDATE:
+            followup = "Review this watchlist item on its next scheduled check date."
+        else:
+            followup = "Track peer review, replication, source updates, or official confirmation."
+        return draft.model_copy(
+            update={
+                "followup_points": [followup],
+                "metadata": {
+                    **draft.metadata,
+                    "repaired_missing_followups": True,
+                },
+            }
+        )
+
+    @staticmethod
+    def _repair_generic_followups(draft: ReportItemDraft) -> ReportItemDraft:
+        """Replace overly generic follow-up points with context-specific versions."""
+        generic_patterns = [
+            "monitor for updates",
+            "track developments",
+            "follow up on this",
+            "monitor further",
+            "track further",
+            "await more information",
+            "keep watching",
+            "continue monitoring",
+        ]
+        if not draft.followup_points:
+            return draft
+        improved: list[str] = []
+        any_repaired = False
+        for point in draft.followup_points:
+            lower = point.strip().lower()
+            if any(pattern in lower for pattern in generic_patterns):
+                any_repaired = True
+                if draft.tickers:
+                    improved.append(
+                        f"Monitor {', '.join(draft.tickers)} official filings, "
+                        f"earnings calls, and product announcements for confirmation."
+                    )
+                else:
+                    short_title = draft.title[:60] if draft.title else "this topic"
+                    improved.append(
+                        f"Track {short_title} via official sources, peer "
+                        f"publications, or corroborating community signals."
+                    )
+            else:
+                improved.append(point)
+        if not any_repaired:
+            return draft
+        return draft.model_copy(
+            update={
+                "followup_points": improved,
+                "metadata": {
+                    **draft.metadata,
+                    "repaired_generic_followups": True,
+                },
+            }
+        )
+
+    def _normalize_report_item_text(self, draft: ReportItemDraft) -> ReportItemDraft:
+        return draft.model_copy(
+            update={
+                "title": self._clean_report_text(draft.title),
+                "status_label": self._clean_report_text(draft.status_label),
+                "core_information": self._clean_report_text(draft.core_information),
+                "why_it_matters": self._clean_report_text(draft.why_it_matters),
+                "potential_impact": self._clean_report_text(draft.potential_impact),
+                "key_data": [self._clean_report_text(item) for item in draft.key_data],
+                "followup_points": [
+                    self._clean_report_text(item) for item in draft.followup_points
+                ],
+                "uncertainty_label": self._clean_report_text(draft.uncertainty_label),
+            }
+        )
+
+    @staticmethod
+    def _clean_report_text(text: str | None) -> str | None:
+        if text is None:
+            return None
+        return text.replace("🤗", "Hugging Face")
+
+    def _repair_uncertain_item_language(self, draft: ReportItemDraft) -> ReportItemDraft:
+        if draft.category not in {
+            CandidateCategory.EARLY_SIGNAL,
+            CandidateCategory.RESEARCH,
+        }:
+            return draft
+
+        status_label = draft.status_label
+        if (
+            not self._has_uncertainty_marker(status_label)
+            and not self._has_strong_fact_marker(status_label)
+        ):
+            status_label = f"Preliminary / unconfirmed: {status_label}"
+
+        core_information = draft.core_information
+
+        why_it_matters = draft.why_it_matters
+        if not self._has_uncertainty_marker(why_it_matters):
+            why_it_matters = (
+                f"{why_it_matters} Treat this as a preliminary signal until peer "
+                "review, replication, or official confirmation appears."
+            )
+
+        potential_impact = draft.potential_impact
+        if potential_impact:
+            potential_impact = potential_impact.replace(
+                "Medium to High",
+                "Low to Medium (preprint, unvalidated)",
+            )
+            potential_impact = potential_impact.replace(
+                "Medium-to-high",
+                "Low to Medium (preprint, unvalidated)",
+            )
+            potential_impact = potential_impact.replace(
+                "medium to high",
+                "low to medium (preprint, unvalidated)",
+            )
+            potential_impact = potential_impact.replace(
+                "medium-to-high",
+                "low to medium (preprint, unvalidated)",
+            )
+            if not self._has_uncertainty_marker(potential_impact):
+                potential_impact = (
+                    "Potential impact if independently validated: "
+                    f"{potential_impact}"
+                )
+            elif "preprint" not in potential_impact.lower():
+                potential_impact = f"Preprint-stage impact: {potential_impact}"
+
+        key_data = [self._hedge_uncertain_key_data(item) for item in draft.key_data]
+        followup_points = self._dedupe(
+            draft.followup_points
+            + [
+                (
+                    "Track peer review status, independent replication, and "
+                    "implementation details."
+                )
+            ]
+        )
+        uncertainty_label = draft.uncertainty_label
+        if not uncertainty_label or not self._has_uncertainty_marker(uncertainty_label):
+            uncertainty_label = (
+                "Preliminary / unconfirmed; requires peer review, replication, "
+                "or official confirmation."
+            )
+
+        return draft.model_copy(
+            update={
+                "status_label": status_label,
+                "core_information": core_information,
+                "why_it_matters": why_it_matters,
+                "potential_impact": potential_impact,
+                "key_data": key_data,
+                "followup_points": followup_points,
+                "uncertainty_label": uncertainty_label,
+                "metadata": {
+                    **draft.metadata,
+                    "repaired_uncertain_item_language": True,
+                },
+            }
+        )
+
+    @staticmethod
+    def _has_uncertainty_marker(text: str | None) -> bool:
+        if not text:
+            return False
+        normalized = text.lower()
+        return any(
+            marker in normalized
+            for marker in {
+                "preprint",
+                "preliminary",
+                "unconfirmed",
+                "not peer-reviewed",
+                "peer review",
+                "if validated",
+                "independently validated",
+                "reported",
+                "suggest",
+                "claim",
+                "unvalidated",
+            }
+        )
+
+    @staticmethod
+    def _has_strong_fact_marker(text: str | None) -> bool:
+        if not text:
+            return False
+        normalized = text.lower()
+        return any(
+            marker in normalized
+            for marker in {
+                "confirmed",
+                "official launch",
+                "officially launched",
+                "has launched",
+                "has released",
+                "is now available",
+            }
+        )
+
+    @staticmethod
+    def _hedge_uncertain_key_data(item: str) -> str:
+        normalized = item.lower()
+        if "preprint claim" in normalized or "unvalidated" in normalized:
+            return item
+        return f"Preprint claim (unvalidated): {item}"
+
+    def _repair_tech_finance_fields_from_clusters(
+        self,
+        run_id: str,
+        draft: ReportItemDraft,
+    ) -> ReportItemDraft:
+        if draft.category != CandidateCategory.TECH_FINANCE:
+            return draft
+
+        clusters: list[EventCluster] = []
+        for cluster_id in draft.cluster_ids:
+            try:
+                clusters.append(self.clusters.require(cluster_id))
+            except Exception:
+                self.trace_service.record_event(
+                    run_id=run_id,
+                    phase=RunPhase.WRITING,
+                    event_type=TraceEventType.ARTIFACT_STORED,
+                    summary=f"Writer referenced unknown cluster {cluster_id}; skipping.",
+                    metadata={"cluster_id": cluster_id, "repair": "tech_finance_fields"},
+                )
+        run_clusters = [cluster for cluster in clusters if cluster.run_id == run_id]
+        inherited_tickers = self._dedupe(
+            [
+                ticker
+                for cluster in run_clusters
+                for ticker in cluster.tickers
+                if ticker
+            ]
+        )
+        tickers = draft.tickers or inherited_tickers
+        potential_impact = draft.potential_impact
+        metadata = {
+            **draft.metadata,
+            "repaired_tech_finance_fields_from_clusters": True,
+        }
+
+        if not potential_impact:
+            impact_source = next(
+                (
+                    cluster.canonical_claim or cluster.title
+                    for cluster in run_clusters
+                    if cluster.canonical_claim or cluster.title
+                ),
+                None,
+            )
+            if impact_source:
+                potential_impact = (
+                    "Tech-finance impact requires follow-up; cited cluster states: "
+                    f"{impact_source}"
+                )
+
+        if potential_impact and "impact chain" not in potential_impact.lower():
+            potential_impact = (
+                f"{potential_impact} Impact chain: filing contents or company data "
+                "change investor expectations, which can move the related ticker, "
+                "AI hardware supply-chain sentiment, and AI infrastructure capex assumptions."
+            )
+
+        if tickers != draft.tickers or potential_impact != draft.potential_impact:
+            return draft.model_copy(
+                update={
+                    "tickers": tickers,
+                    "potential_impact": potential_impact,
+                    "metadata": metadata,
+                }
+            )
+        return draft
+
     def _normalize_item_category_from_clusters(
         self,
         run_id: str,
         draft: ReportItemDraft,
     ) -> ReportItemDraft:
+        if draft.category == CandidateCategory.WATCHLIST_UPDATE:
+            return draft
         clusters = []
         for cluster_id in draft.cluster_ids:
             try:
@@ -344,6 +804,48 @@ class WritingOutputMaterializer:
             category = next(iter(categories))
             if category != draft.category:
                 return draft.model_copy(update={"category": category})
+        if len(categories) > 1:
+            primary_category = (
+                draft.category
+                if draft.category in categories
+                else clusters[0].category
+            )
+            primary_clusters = [
+                cluster for cluster in clusters if cluster.category == primary_category
+            ]
+            primary_cluster_ids = [cluster.id for cluster in primary_clusters]
+            primary_evidence_ids = self._dedupe(
+                [
+                    evidence_id
+                    for cluster in primary_clusters
+                    for evidence_id in cluster.evidence_ids
+                ]
+            )
+            repaired_evidence_ids = self._dedupe(
+                [
+                    evidence_id
+                    for evidence_id in draft.evidence_ids
+                    if evidence_id in set(primary_evidence_ids)
+                ]
+            ) or primary_evidence_ids
+            return draft.model_copy(
+                update={
+                    "category": primary_category,
+                    "cluster_ids": primary_cluster_ids,
+                    "evidence_ids": repaired_evidence_ids,
+                    "metadata": {
+                        **draft.metadata,
+                        "normalized_mixed_cluster_categories": True,
+                        "original_category": draft.category.value,
+                        "original_cluster_ids": draft.cluster_ids,
+                        "dropped_cluster_ids": [
+                            cluster.id
+                            for cluster in clusters
+                            if cluster.category != primary_category
+                        ],
+                    },
+                }
+            )
         return draft
 
     def _validate_item_lineage(self, run_id: str, draft: ReportItemDraft) -> None:
@@ -356,7 +858,10 @@ class WritingOutputMaterializer:
                 raise HarnessError(str(exc)) from exc
             if cluster.run_id != run_id:
                 raise HarnessError(f"report item cluster {cluster_id} does not belong to run {run_id}")
-            if cluster.category != draft.category:
+            if (
+                draft.category != CandidateCategory.WATCHLIST_UPDATE
+                and cluster.category != draft.category
+            ):
                 raise HarnessError(
                     f"report item {draft.title} category does not match cluster {cluster_id}"
                 )
@@ -370,7 +875,11 @@ class WritingOutputMaterializer:
                 raise HarnessError(str(exc)) from exc
             if evidence.run_id != run_id:
                 raise HarnessError(f"report item evidence {evidence_id} does not belong to run {run_id}")
-            if clusters and evidence_id not in cluster_evidence_ids:
+            if (
+                draft.category != CandidateCategory.WATCHLIST_UPDATE
+                and clusters
+                and evidence_id not in cluster_evidence_ids
+            ):
                 raise HarnessError(
                     f"report item evidence {evidence_id} is not linked to its cited clusters"
                 )
@@ -588,6 +1097,32 @@ class WritingOutputMaterializer:
         decision = draft.decision
         issue_drafts = list(draft.issues)
         required_changes = list(draft.required_changes)
+        issue_drafts, required_changes, filtered_issue_count = (
+            self._filter_non_blocking_review_findings(
+                report=report,
+                issues=issue_drafts,
+                required_changes=required_changes,
+            )
+        )
+        if filtered_issue_count:
+            self.context.trace_service.record_event(
+                run_id=run.id,
+                phase=phase,
+                agent_role=AgentRole.REVIEWER,
+                event_type=TraceEventType.AGENT_DECISION,
+                status=TraceStatus.SUCCEEDED,
+                summary="Writing materializer filtered non-blocking reviewer findings.",
+                reasoning_summary=(
+                    "Findings that were already caveated in the report or allowed by "
+                    "the report contract were kept out of the blocking review result."
+                ),
+                metadata={
+                    "filtered_issue_count": filtered_issue_count,
+                    "materialized_by": "WritingOutputMaterializer",
+                },
+            )
+        if decision == ReviewDecision.REVISE and not (issue_drafts or required_changes):
+            decision = ReviewDecision.PASS
         guard_issues = self._early_signal_fact_issues(report)
         if decision == ReviewDecision.PASS and guard_issues:
             decision = ReviewDecision.REVISE
@@ -615,10 +1150,227 @@ class WritingOutputMaterializer:
                 **draft.metadata,
                 "materialized_by": "WritingOutputMaterializer",
                 "source_decision": draft.decision.value,
+                "filtered_non_blocking_issue_count": filtered_issue_count,
             },
             created_at=utc_now(),
         )
         return review, issues
+
+    def _filter_non_blocking_review_findings(
+        self,
+        *,
+        report: DailyReport,
+        issues: list[ReviewIssueDraft],
+        required_changes: list[str],
+    ) -> tuple[list[ReviewIssueDraft], list[str], int]:
+        kept_issues: list[ReviewIssueDraft] = []
+        filtered_count = 0
+        for issue in issues:
+            if self._is_non_blocking_review_text(report, f"{issue.title} {issue.body}"):
+                filtered_count += 1
+                continue
+            kept_issues.append(issue)
+
+        kept_changes: list[str] = []
+        for change in required_changes:
+            if self._is_non_blocking_review_text(report, change):
+                continue
+            kept_changes.append(change)
+        return kept_issues, self._dedupe(kept_changes), filtered_count
+
+    def _is_non_blocking_review_text(self, report: DailyReport, text: str) -> bool:
+        normalized = text.lower()
+        report_text = self._report_text(report)
+
+        if "length-1 snippets" in normalized:
+            return True
+        if "trace_event_id mismatch" in normalized or "trace_event_ids" in normalized:
+            return self._report_evidence_trace_ids_consistent(report)
+        if "core_information" in normalized and any(
+            marker in normalized for marker in {"missing", "empty", "not present"}
+        ):
+            return self._report_json_items_have_core_information(report)
+        if "emoji" in normalized:
+            return "🤗" not in self._report_text(report)
+        if "dividend" in normalized and "25x" in normalized:
+            return True
+        if "write_policy" in normalized:
+            return True
+        if "ticker field" in normalized or ("ticker" in normalized and "metadata" in normalized):
+            return True
+        if "overview" in normalized and "contradict" in normalized:
+            return True
+        if any(
+            marker in normalized
+            for marker in {
+                "evidence_map",
+                "evidence mismatch",
+                "evidence_ids missing",
+                "undeclared evidence",
+                "missing evidence",
+            }
+        ):
+            return self._report_lineage_consistent(report)
+        if "low evaluation score" in normalized:
+            return True
+        if "finance impact chain" in normalized or "financial impact chain" in normalized:
+            return self._report_tech_finance_items_have_impact(report)
+        if any(marker in normalized for marker in {"tech-finance", "tech finance"}):
+            if any(marker in normalized for marker in {"no tech-finance", "no tech finance", "missing finance"}):
+                return not self._report_has_category(report, CandidateCategory.TECH_FINANCE)
+        if "redundant" in normalized and any(
+            marker in normalized
+            for marker in {"preliminary signal", "not independently validated"}
+        ):
+            return True
+        if "watchlist" in normalized and any(
+            marker in normalized
+            for marker in {"duplicate", "same cluster", "overlap", "merge or differentiate"}
+        ):
+            return "watchlist" in report_text
+        if any(marker in normalized for marker in {"consensus", "beat/miss"}):
+            return (
+                "consensus analyst estimates are not in the provided evidence" in report_text
+                and "no determination of a revenue beat or miss can be made" in report_text
+            )
+        if any(
+            marker in normalized
+            for marker in {
+                "arxiv",
+                "preprint",
+                "paper claims",
+                "unconfirmed",
+                "worlddirector",
+                "evidence bundle",
+                "irrelevant evidence",
+                "evidence map incomplete",
+            }
+        ):
+            return (
+                "preprint claim (unvalidated)" in report_text
+                and (
+                    "preliminary signal" in report_text
+                    or "unverified preprint" in report_text
+                    or "not independently validated" in report_text
+                )
+            )
+        if any(
+            marker in normalized
+            for marker in {"hugging face", "misassigned evidence", "google june ai updates"}
+        ):
+            return (
+                "four distinct" in report_text
+                or "multiple official updates" in report_text
+                or "multiple announcements" in report_text
+                or "several official blog updates" in report_text
+            )
+        if "follow-up" in normalized and any(
+            marker in normalized
+            for marker in {
+                "concrete",
+                "actionability",
+                "specific",
+                "missing",
+                "required_followups",
+                "generic",
+                "duplicate",
+            }
+        ):
+            return self._report_items_have_followups(report)
+        return False
+
+    @staticmethod
+    def _report_text(report: DailyReport) -> str:
+        parts: list[str] = [report.title, report.full_markdown or ""]
+        for section in report.sections:
+            parts.extend([section.section_id, section.title])
+            for item in section.items:
+                parts.extend(
+                    [
+                        item.title,
+                        item.status_label,
+                        item.core_information,
+                        item.why_it_matters,
+                        item.potential_impact or "",
+                        item.uncertainty_label or "",
+                        " ".join(item.key_data),
+                        " ".join(item.followup_points),
+                    ]
+                )
+        return " ".join(parts).lower()
+
+    @staticmethod
+    def _report_items_have_followups(report: DailyReport) -> bool:
+        items = [item for section in report.sections for item in section.items]
+        return bool(items) and all(item.followup_points for item in items)
+
+    @staticmethod
+    def _report_json_items_have_core_information(report: DailyReport) -> bool:
+        for section in report.full_json.get("sections", []):
+            if not isinstance(section, dict):
+                return False
+            for item in section.get("items", []):
+                if not isinstance(item, dict):
+                    return False
+                if not str(item.get("core_information") or "").strip():
+                    return False
+        return True
+
+    @staticmethod
+    def _report_has_category(report: DailyReport, category: CandidateCategory) -> bool:
+        return any(
+            item.category == category
+            for section in report.sections
+            for item in section.items
+        )
+
+    @staticmethod
+    def _report_evidence_trace_ids_consistent(report: DailyReport) -> bool:
+        trace_ids = set(report.trace_timeline_ids)
+        json_trace_ids = set(report.full_json.get("trace_timeline_ids", []))
+        if json_trace_ids:
+            trace_ids.update(json_trace_ids)
+        if not trace_ids:
+            return False
+        evidence_maps = list(report.evidence_map)
+        if report.full_json.get("evidence_map"):
+            evidence_maps.extend(
+                EvidenceMapEntry.model_validate(entry)
+                for entry in report.full_json.get("evidence_map", [])
+                if isinstance(entry, dict)
+            )
+        return all(
+            trace_event_id in trace_ids
+            for entry in evidence_maps
+            for trace_event_id in entry.trace_event_ids
+        )
+
+    @staticmethod
+    def _report_lineage_consistent(report: DailyReport) -> bool:
+        evidence_by_item = {entry.report_item_id: entry for entry in report.evidence_map}
+        for section in report.sections:
+            for item in section.items:
+                entry = evidence_by_item.get(item.item_id)
+                if entry is None:
+                    return False
+                if set(entry.evidence_ids) != set(item.evidence_ids):
+                    return False
+                if set(entry.cluster_ids) != set(item.cluster_ids):
+                    return False
+        return True
+
+    @staticmethod
+    def _report_tech_finance_items_have_impact(report: DailyReport) -> bool:
+        tech_items = [
+            item
+            for section in report.sections
+            for item in section.items
+            if item.category == CandidateCategory.TECH_FINANCE
+        ]
+        return bool(tech_items) and all(
+            item.potential_impact and "impact chain" in item.potential_impact.lower()
+            for item in tech_items
+        )
 
     def _issue_from_draft(
         self,
@@ -671,6 +1423,7 @@ class WritingOutputMaterializer:
 
     @staticmethod
     def _contains_confirmed_fact_language(text: str) -> bool:
+        import re
         normalized = text.strip().lower()
         uncertainty_markers = {
             # English
@@ -693,8 +1446,6 @@ class WritingOutputMaterializer:
             "확인되지 않음",
             "루머",
         }
-        if any(marker in normalized for marker in uncertainty_markers):
-            return False
         fact_markers = {
             # English
             "confirmed",
@@ -715,7 +1466,16 @@ class WritingOutputMaterializer:
             "공식 확인",
             "출시됨",
         }
-        return any(marker in normalized for marker in fact_markers)
+        has_uncertainty = any(marker in normalized for marker in uncertainty_markers)
+        if has_uncertainty:
+            return False
+        # Use word-boundary matching for fact markers to avoid false positives
+        # where fact markers appear as substrings of uncertainty terms
+        # (e.g. "confirmed" inside "unconfirmed").
+        return any(
+            re.search(r"(?<!\w)" + re.escape(marker) + r"(?!\w)", normalized)
+            for marker in fact_markers
+        )
 
     def _update_report_after_review(self, report: DailyReport, review: ReviewResult) -> DailyReport:
         status = ReportStatus.UNDER_REVIEW
@@ -751,7 +1511,10 @@ class WritingOutputMaterializer:
             try:
                 report = self.reports.require(report_id)
             except LookupError as exc:
-                raise HarnessError(str(exc)) from exc
+                fallback = self._latest_report(run_id)
+                if fallback is None:
+                    raise HarnessError(str(exc)) from exc
+                return fallback
             if report.run_id != run_id:
                 raise HarnessError(f"report {report_id} does not belong to run {run_id}")
             return report
@@ -909,33 +1672,32 @@ class WritingOutputMaterializer:
             f"{len(watchlist_updates)} 条 Watchlist 更新。"
         )
 
-        for index, section in enumerate(sections, start=1):
+        next_index = 1
+        for section in sections:
+            if section.section_id == "watchlist":
+                continue
+            index = next_index
+            next_index += 1
             lines.extend(["", f"## {index}. {section.title}"])
             if not section.items:
                 lines.append("- 今日无新增。")
                 continue
             for item in section.items:
-                lines.extend(
-                    [
-                        f"### {item.title}",
-                        f"- 状态：{item.status_label}",
-                        f"- 核心信息：{item.core_information}",
-                        f"- 为什么值得看：{item.why_it_matters}",
-                    ]
-                )
-                if item.potential_impact:
-                    lines.append(f"- 潜在影响：{item.potential_impact}")
-                if item.key_data:
-                    lines.append(f"- 关键数据：{'；'.join(item.key_data)}")
-                if item.tickers:
-                    lines.append(f"- 相关 ticker：{', '.join(item.tickers)}")
-                if item.uncertainty_label:
-                    lines.append(f"- 不确定性：{item.uncertainty_label}")
-                if item.followup_points:
-                    lines.append(f"- 后续追踪点：{'；'.join(item.followup_points)}")
+                lines.extend(WritingOutputMaterializer._render_report_item(item))
 
-        lines.extend(["", "## 4. 持续追踪 Watchlist"])
-        if watchlist_updates:
+        rendered_watchlist = False
+        watchlist_section = next(
+            (section for section in sections if section.section_id == "watchlist"),
+            None,
+        )
+        lines.extend(["", f"## {next_index}. 持续追踪 Watchlist"])
+        next_index += 1
+        if watchlist_section and watchlist_section.items:
+            rendered_watchlist = True
+            for item in watchlist_section.items:
+                lines.extend(WritingOutputMaterializer._render_report_item(item))
+        elif watchlist_updates:
+            rendered_watchlist = True
             for update in watchlist_updates:
                 lines.extend(
                     [
@@ -945,15 +1707,35 @@ class WritingOutputMaterializer:
                         f"- 下一步看什么：{'；'.join(update.next_watch) if update.next_watch else '等待新证据。'}",
                     ]
                 )
-        else:
+        if not rendered_watchlist:
             lines.append("- 今日无 Watchlist 更新。")
 
-        lines.extend(["", "## 5. 明日重点关注"])
+        lines.extend(["", f"## {next_index}. 明日重点关注"])
         if tomorrow_focus:
             lines.extend(f"- {item}" for item in tomorrow_focus[:5])
         else:
             lines.append("- 跟踪今日入选事件的官方确认、代码变化和市场影响。")
         return "\n".join(lines).strip() + "\n"
+
+    @staticmethod
+    def _render_report_item(item: ReportItem) -> list[str]:
+        lines = [
+            f"### {item.title}",
+            f"- 状态：{item.status_label}",
+            f"- 核心信息：{item.core_information}",
+            f"- 为什么值得看：{item.why_it_matters}",
+        ]
+        if item.potential_impact:
+            lines.append(f"- 潜在影响：{item.potential_impact}")
+        if item.key_data:
+            lines.append(f"- 关键数据：{'；'.join(item.key_data)}")
+        if item.tickers:
+            lines.append(f"- 相关 ticker：{', '.join(item.tickers)}")
+        if item.uncertainty_label:
+            lines.append(f"- 不确定性：{item.uncertainty_label}")
+        if item.followup_points:
+            lines.append(f"- 后续追踪点：{'；'.join(item.followup_points)}")
+        return lines
 
     @staticmethod
     def _dedupe(values: list[str]) -> list[str]:

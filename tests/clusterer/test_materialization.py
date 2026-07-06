@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from app.agents.outputs import ClusterDraft, ClusterTimelineDraft, ClustererOutput
 from app.agents.schemas import AgentRunResult
 from app.clusterer.materialization import ClusterOutputMaterializer
@@ -20,7 +18,7 @@ from app.domain import (
     SourceType,
     TraceEventType,
 )
-from app.harness import HarnessConfig, HarnessContext, HarnessError
+from app.harness import HarnessConfig, HarnessContext
 from app.repositories import (
     CandidateRepository,
     EvaluationRepository,
@@ -184,25 +182,125 @@ def test_cluster_materializer_merges_existing_dedupe_key_and_preserves_conflict(
     assert persisted_run.cluster_ids == [clusters[0].id]
 
 
-def test_cluster_materializer_rejects_unknown_candidate_id(db_session) -> None:
+def test_cluster_materializer_repairs_missing_candidate_id_from_evidence(db_session) -> None:
+    run = run_state_fixture()
+    RunRepository(db_session).add(run)
+    _persist_evidence_and_candidates(db_session)
+
+    result = ClusterOutputMaterializer(HarnessContext(db_session)).materialize(
+        run=run,
+        phase=RunPhase.CLUSTERING,
+        agent_role=AgentRole.CLUSTERER,
+        result=_cluster_result(
+            ClusterDraft(
+                category=CandidateCategory.EARLY_SIGNAL,
+                title="Repaired cluster",
+                canonical_claim="This cluster can be repaired from evidence lineage.",
+                candidate_ids=["missing_candidate"],
+                evidence_ids=["ev_phase9_social"],
+            )
+        ),
+        bootstrap_evaluations=False,
+    )
+
+    cluster = EventClusterRepository(db_session).require(result.cluster_ids[0])
+    assert cluster.candidate_ids == ["cand_phase9_early"]
+    assert cluster.metadata["repaired_candidate_ids"] is True
+    assert cluster.metadata["requested_candidate_ids"] == ["missing_candidate"]
+    assert cluster.metadata["fallback_candidate_ids_from_run"] is True
+
+
+def test_cluster_materializer_filters_missing_candidate_ids(db_session) -> None:
+    run = run_state_fixture()
+    RunRepository(db_session).add(run)
+    _persist_evidence_and_candidates(db_session)
+
+    result = ClusterOutputMaterializer(HarnessContext(db_session)).materialize(
+        run=run,
+        phase=RunPhase.CLUSTERING,
+        agent_role=AgentRole.CLUSTERER,
+        result=_cluster_result(
+            ClusterDraft(
+                category=CandidateCategory.EARLY_SIGNAL,
+                title="Partially repaired cluster",
+                canonical_claim="This cluster keeps valid candidate lineage.",
+                candidate_ids=["missing_candidate", "cand_phase9_early"],
+            )
+        ),
+        bootstrap_evaluations=False,
+    )
+
+    cluster = EventClusterRepository(db_session).require(result.cluster_ids[0])
+    assert cluster.candidate_ids == ["cand_phase9_early"]
+    assert cluster.metadata["missing_candidate_ids"] == ["missing_candidate"]
+
+
+def test_cluster_materializer_repairs_missing_evidence_ids_from_candidates(db_session) -> None:
+    run = run_state_fixture()
+    RunRepository(db_session).add(run)
+    _persist_evidence_and_candidates(db_session)
+
+    result = ClusterOutputMaterializer(HarnessContext(db_session)).materialize(
+        run=run,
+        phase=RunPhase.CLUSTERING,
+        agent_role=AgentRole.CLUSTERER,
+        result=_cluster_result(
+            ClusterDraft(
+                category=CandidateCategory.EARLY_SIGNAL,
+                title="Evidence repaired cluster",
+                canonical_claim="This cluster keeps verified candidate evidence only.",
+                candidate_ids=["cand_phase9_early"],
+                evidence_ids=["ev_missing_clusterer_hallucination"],
+                timeline=[
+                    ClusterTimelineDraft(
+                        summary="Clusterer referenced a bad evidence ID.",
+                        evidence_ids=["ev_missing_clusterer_hallucination"],
+                    )
+                ],
+            )
+        ),
+        bootstrap_evaluations=False,
+    )
+
+    cluster = EventClusterRepository(db_session).require(result.cluster_ids[0])
+    assert cluster.evidence_ids == ["ev_phase9_social"]
+    assert cluster.timeline[0].evidence_ids == ["ev_phase9_social"]
+    assert cluster.metadata["repaired_evidence_ids"] is True
+    assert cluster.metadata["missing_evidence_ids"] == ["ev_missing_clusterer_hallucination"]
+    timeline = TraceService(db_session).reconstruct_timeline(RUN_ID)
+    assert any(
+        event.summary == "Clusterer draft evidence lineage was repaired before materialization."
+        and event.metadata["missing_evidence_ids"] == ["ev_missing_clusterer_hallucination"]
+        for event in timeline.events
+    )
+
+
+def test_cluster_materializer_skips_unrepairable_candidate_lineage(db_session) -> None:
     run = run_state_fixture()
     RunRepository(db_session).add(run)
 
-    with pytest.raises(HarnessError, match="not found"):
-        ClusterOutputMaterializer(HarnessContext(db_session)).materialize(
-            run=run,
-            phase=RunPhase.CLUSTERING,
-            agent_role=AgentRole.CLUSTERER,
-            result=_cluster_result(
-                ClusterDraft(
-                    category=CandidateCategory.EARLY_SIGNAL,
-                    title="Bad cluster",
-                    canonical_claim="This cluster references a missing candidate.",
-                    candidate_ids=["missing_candidate"],
-                )
-            ),
-            bootstrap_evaluations=False,
-        )
+    result = ClusterOutputMaterializer(HarnessContext(db_session)).materialize(
+        run=run,
+        phase=RunPhase.CLUSTERING,
+        agent_role=AgentRole.CLUSTERER,
+        result=_cluster_result(
+            ClusterDraft(
+                category=CandidateCategory.EARLY_SIGNAL,
+                title="Bad cluster",
+                canonical_claim="This cluster references a missing candidate.",
+                candidate_ids=["missing_candidate"],
+            )
+        ),
+        bootstrap_evaluations=False,
+    )
+
+    assert result.cluster_ids == []
+    timeline = TraceService(db_session).reconstruct_timeline(RUN_ID)
+    assert any(
+        event.summary == "Clusterer draft skipped because candidate lineage could not be repaired."
+        and event.metadata["skipped"] is True
+        for event in timeline.events
+    )
 
 
 def _cluster_result(draft: ClusterDraft) -> AgentRunResult:

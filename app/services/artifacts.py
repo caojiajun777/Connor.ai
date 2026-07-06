@@ -233,6 +233,8 @@ class ArtifactService:
             return [ArtifactService._json_safe(item) for item in value]
         if isinstance(value, tuple):
             return [ArtifactService._json_safe(item) for item in value]
+        if isinstance(value, (set, frozenset)):
+            return sorted(str(item) for item in value)
         return value
 
     @staticmethod

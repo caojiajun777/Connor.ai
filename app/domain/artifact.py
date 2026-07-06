@@ -27,8 +27,8 @@ class Artifact(DomainModel):
 
     @model_validator(mode="after")
     def validate_storage_location(self) -> "Artifact":
-        if self.storage == ArtifactStorage.INLINE and self.inline_content is None:
-            raise ValueError("inline artifacts require inline_content")
+        if self.storage in {ArtifactStorage.INLINE, ArtifactStorage.DATABASE} and self.inline_content is None:
+            raise ValueError("inline or database artifacts require inline_content")
         if self.storage in {ArtifactStorage.FILE, ArtifactStorage.OBJECT_STORE} and not self.uri:
             raise ValueError("file or object-store artifacts require uri")
         return self

@@ -128,7 +128,18 @@ class WatchlistOutputMaterializer:
 
         materialized = WatchlistMaterializationResult()
         for draft in watchlist_drafts or []:
-            item = self._create_or_update_watchlist(run=run, draft=draft)
+            try:
+                item = self._create_or_update_watchlist(run=run, draft=draft)
+            except HarnessError as exc:
+                self._trace_skipped_draft(
+                    run=run,
+                    phase=phase,
+                    agent_role=agent_role,
+                    draft_type="watchlist",
+                    draft=draft,
+                    error=exc,
+                )
+                continue
             self.watchlist.add(item)
             materialized.watchlist_ids.append(item.id)
             if item.thread_id:
@@ -150,7 +161,18 @@ class WatchlistOutputMaterializer:
             )
 
         for draft in archive_drafts or []:
-            archive = self._create_or_update_archive(run=run, draft=draft)
+            try:
+                archive = self._create_or_update_archive(run=run, draft=draft)
+            except HarnessError as exc:
+                self._trace_skipped_draft(
+                    run=run,
+                    phase=phase,
+                    agent_role=agent_role,
+                    draft_type="archive",
+                    draft=draft,
+                    error=exc,
+                )
+                continue
             self.archives.add(archive)
             materialized.archive_ids.append(archive.id)
             if archive.thread_id:
@@ -175,7 +197,18 @@ class WatchlistOutputMaterializer:
             )
 
         for draft in thread_drafts or []:
-            thread = self._create_or_update_thread(draft)
+            try:
+                thread = self._create_or_update_thread(draft)
+            except HarnessError as exc:
+                self._trace_skipped_draft(
+                    run=run,
+                    phase=phase,
+                    agent_role=agent_role,
+                    draft_type="thread",
+                    draft=draft,
+                    error=exc,
+                )
+                continue
             self.threads.add(thread)
             materialized.thread_ids.append(thread.id)
             self._trace_thread(run=run, phase=phase, agent_role=agent_role, thread=thread)
@@ -186,6 +219,32 @@ class WatchlistOutputMaterializer:
         self._update_run_lineage(run.id, materialized)
         self.context.session.flush()
         return materialized
+
+    def _trace_skipped_draft(
+        self,
+        *,
+        run: RunState,
+        phase: RunPhase,
+        agent_role: AgentRole,
+        draft_type: str,
+        draft,
+        error: HarnessError,
+    ) -> None:
+        self.context.trace_service.record_event(
+            run_id=run.id,
+            phase=phase,
+            agent_role=agent_role,
+            event_type=TraceEventType.AGENT_DECISION,
+            status=TraceStatus.FAILED,
+            summary=f"Skipped invalid {draft_type} draft during watchlist materialization.",
+            error=str(error),
+            input_payload=draft.model_dump(mode="json"),
+            metadata={
+                "draft_type": draft_type,
+                "materialized_by": "WatchlistOutputMaterializer",
+                "skipped": True,
+            },
+        )
 
     def _create_or_update_watchlist(self, *, run: RunState, draft: WatchlistDraft) -> WatchlistItem:
         now = utc_now()
@@ -698,6 +757,7 @@ class WatchlistOutputMaterializer:
                 item.watchlist_id,
                 item.archive_id,
                 item.report_id,
+                tuple(sorted(item.evidence_ids)),
             )
             for item in merged
         }
@@ -709,6 +769,7 @@ class WatchlistOutputMaterializer:
                 item.watchlist_id,
                 item.archive_id,
                 item.report_id,
+                tuple(sorted(item.evidence_ids)),
             )
             if key not in keys:
                 merged.append(item)
@@ -770,6 +831,6 @@ class WatchlistOutputMaterializer:
     def _dedupe(values: list[str | None]) -> list[str]:
         deduped: list[str] = []
         for value in values:
-            if value and value not in deduped:
+            if value is not None and value not in deduped:
                 deduped.append(value)
         return deduped

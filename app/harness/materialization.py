@@ -35,6 +35,16 @@ from app.scouts.profiles import (
 )
 
 
+FINANCE_SIGNAL_STATUS_NORMALIZATIONS = {
+    SignalStatus.OFFICIAL_CONFIRMATION: SignalStatus.CONFIRMED_FACT,
+    SignalStatus.UNCONFIRMED_LEAK: SignalStatus.SINGLE_SOURCE_SIGNAL,
+    SignalStatus.GRAY_ROLLOUT_FEEDBACK: SignalStatus.SINGLE_SOURCE_SIGNAL,
+    SignalStatus.CODE_ANOMALY: SignalStatus.SINGLE_SOURCE_SIGNAL,
+    SignalStatus.RESEARCHER_HINT: SignalStatus.SINGLE_SOURCE_SIGNAL,
+    SignalStatus.COMMUNITY_RUMOR: SignalStatus.SINGLE_SOURCE_SIGNAL,
+}
+
+
 @dataclass
 class MaterializationResult:
     """Domain objects created from one agent result."""
@@ -222,22 +232,32 @@ class ScoutOutputMaterializer:
     ) -> tuple[CandidateDraft, dict]:
         """Normalize common LLM category slips that are still role-valid."""
 
-        if (
-            agent_role == AgentRole.FINANCE_SCOUT
-            and draft.category != CandidateCategory.TECH_FINANCE
-        ):
-            next_metadata = {
-                **metadata,
-                "normalized_category_from": draft.category.value,
-                "normalized_category_reason": "finance_scout_outputs_tech_finance",
-            }
-            next_draft = draft.model_copy(
-                update={
-                    "category": CandidateCategory.TECH_FINANCE,
-                    "metadata": next_metadata,
+        if agent_role == AgentRole.FINANCE_SCOUT:
+            next_metadata = dict(metadata)
+            updates = {}
+            if draft.category != CandidateCategory.TECH_FINANCE:
+                next_metadata = {
+                    **next_metadata,
+                    "normalized_category_from": draft.category.value,
+                    "normalized_category_reason": "finance_scout_outputs_tech_finance",
                 }
+                updates["category"] = CandidateCategory.TECH_FINANCE
+
+            normalized_signal_status = FINANCE_SIGNAL_STATUS_NORMALIZATIONS.get(
+                draft.signal_status
             )
-            return next_draft, next_metadata
+            if normalized_signal_status is not None:
+                next_metadata = {
+                    **next_metadata,
+                    "normalized_signal_status_from": draft.signal_status.value,
+                    "normalized_signal_status_reason": "finance_scout_status_boundary",
+                }
+                updates["signal_status"] = normalized_signal_status
+
+            if updates:
+                updates["metadata"] = next_metadata
+                next_draft = draft.model_copy(update=updates)
+                return next_draft, next_metadata
 
         if (
             agent_role == AgentRole.OFFICIAL_SCOUT
@@ -407,6 +427,7 @@ class ScoutOutputMaterializer:
 
     def _update_run_lineage(self, run_id: str, materialized: MaterializationResult) -> None:
         run = self.context.runs.require(run_id)
+        existing_meta = run.metadata.get("single_agent_materialization", {})
         updated = run.model_copy(
             update={
                 "candidate_ids": self._dedupe(run.candidate_ids + materialized.candidate_ids),
@@ -414,9 +435,15 @@ class ScoutOutputMaterializer:
                 "metadata": {
                     **run.metadata,
                     "single_agent_materialization": {
-                        "candidate_ids": materialized.candidate_ids,
-                        "cluster_ids": materialized.cluster_ids,
-                        "evaluation_ids": materialized.evaluation_ids,
+                        "candidate_ids": self._dedupe(
+                            existing_meta.get("candidate_ids", []) + materialized.candidate_ids
+                        ),
+                        "cluster_ids": self._dedupe(
+                            existing_meta.get("cluster_ids", []) + materialized.cluster_ids
+                        ),
+                        "evaluation_ids": self._dedupe(
+                            existing_meta.get("evaluation_ids", []) + materialized.evaluation_ids
+                        ),
                     },
                 },
             }
@@ -438,6 +465,12 @@ class ScoutOutputMaterializer:
             if item is not None:
                 evidence_items.append(item)
                 valid_evidence_ids.append(evidence_id)
+            else:
+                import logging
+                _logger = logging.getLogger(__name__)
+                _logger.warning(
+                    "Agent produced evidence ID not found in repository: %s", evidence_id
+                )
         return valid_evidence_ids, evidence_items
 
     @staticmethod

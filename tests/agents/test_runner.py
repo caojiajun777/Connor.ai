@@ -289,8 +289,19 @@ def test_agent_runner_uses_agentscope_tool_loop_and_traces_output(db_session) ->
     ]
 
 
-def test_agent_runner_finalizes_json_after_react_iteration_limit(db_session) -> None:
+def test_agent_runner_uses_scout_fallback_after_react_iteration_limit(db_session) -> None:
     RunRepository(db_session).add(run_state_fixture())
+    max_iters_response = ChatResponse(
+        content=[
+            TextBlock(
+                text=(
+                    "Executed maximum iterations of reasoning-acting loop "
+                    "without finishing."
+                )
+            )
+        ],
+        is_last=True,
+    )
     model = ScriptedAgentScopeModel(
         [
             tool_call_response(
@@ -299,13 +310,7 @@ def test_agent_runner_finalizes_json_after_react_iteration_limit(db_session) -> 
                 title="First code signal",
                 raw_hash="sha256:agent-manual-1",
             ),
-            tool_call_response(
-                call_id="tool_call_manual_seed_2",
-                query="second code signal",
-                title="Second code signal",
-                raw_hash="sha256:agent-manual-2",
-            ),
-            finalization_response_from_payload,
+            max_iters_response,
         ]
     )
     tool_registry = create_default_tool_registry()
@@ -329,25 +334,24 @@ def test_agent_runner_finalizes_json_after_react_iteration_limit(db_session) -> 
     )
     db_session.commit()
 
-    assert result.structured_output.summary.startswith("Finalized")
-    assert len(result.tool_results) == 2
-    assert len(result.structured_output.evidence_ids) == 2
-    assert len(model.calls) == 3
-    assert model.calls[-1]["tools"] == []
+    assert result.structured_output.summary.startswith("Deterministically created")
+    assert len(result.tool_results) == 1
+    assert len(result.structured_output.evidence_ids) == 1
+    assert len(result.structured_output.candidate_drafts) == 1
+    assert len(model.calls) == 2
     assert result.completion_trace_event is not None
     assert result.completion_trace_event.metadata["react_max_iters_repaired"] is True
+    assert result.completion_trace_event.metadata["deterministic_structured_fallback"] is True
 
     timeline = TraceService(db_session).reconstruct_timeline(RUN_ID)
     assert [event.event_type for event in timeline.events] == [
         TraceEventType.AGENT_STARTED,
         TraceEventType.TOOL_CALL_COMPLETED,
         TraceEventType.EVIDENCE_CREATED,
-        TraceEventType.TOOL_CALL_COMPLETED,
-        TraceEventType.EVIDENCE_CREATED,
-        TraceEventType.AGENT_DECISION,
         TraceEventType.AGENT_DECISION,
         TraceEventType.AGENT_COMPLETED,
     ]
+    assert timeline.events[-2].metadata["repair_mode"] == "deterministic_scout_fallback"
 
 
 def test_agent_runner_moves_extra_nested_output_fields_to_metadata(db_session) -> None:
@@ -467,6 +471,103 @@ def test_agent_runner_uses_clusterer_fallback_after_failed_repair(db_session) ->
     assert len(result.structured_output.cluster_drafts) == 1
     assert result.structured_output.cluster_drafts[0].candidate_ids == ["cand_openai_reasoning"]
     assert result.completion_trace_event is not None
+    assert result.completion_trace_event.metadata["deterministic_structured_fallback"] is True
+
+
+def test_agent_runner_uses_clusterer_fallback_after_timeout(db_session) -> None:
+    RunRepository(db_session).add(run_state_fixture())
+    tool_registry = create_default_tool_registry()
+    role_registry = create_default_agent_role_registry(tool_registry)
+    role_registry.require(AgentRole.CLUSTERER).execution.timeout_seconds = 0.001
+    runner = AgentRunner(
+        db_session,
+        role_registry=role_registry,
+        tool_registry=tool_registry,
+        model_factory=lambda _config: SlowAgentScopeModel(),
+    )
+
+    result = runner.run(
+        AgentRunRequest(
+            run_id=RUN_ID,
+            phase=RunPhase.CLUSTERING,
+            agent_role=AgentRole.CLUSTERER,
+            task="Cluster candidate drafts.",
+            context={
+                "candidate_context": [
+                    {
+                        "id": "cand_openai_reasoning",
+                        "category": "early_signal",
+                        "claim_summary": "OpenAI may be testing a reasoning API option.",
+                        "entities": ["OpenAI"],
+                        "tickers": [],
+                        "topics": ["api", "reasoning"],
+                        "evidence_ids": ["ev_openai_reasoning"],
+                    }
+                ]
+            },
+        )
+    )
+
+    assert result.structured_output.metadata["deterministic_fallback"] is True
+    assert result.structured_output.cluster_drafts[0].candidate_ids == ["cand_openai_reasoning"]
+    assert result.completion_trace_event is not None
+    assert result.completion_trace_event.metadata["timeout_fallback"] is True
+    timeline = TraceService(db_session).reconstruct_timeline(RUN_ID)
+    assert any(event.event_type == TraceEventType.ERROR for event in timeline.events)
+
+
+def test_agent_runner_uses_writer_fallback_after_failed_repair(db_session) -> None:
+    RunRepository(db_session).add(run_state_fixture())
+    malformed_response = ChatResponse(
+        content=[TextBlock(text='{"summary": "Still truncated", "report_drafts": [')],
+        is_last=True,
+    )
+    model = ScriptedAgentScopeModel([malformed_response, malformed_response])
+    runner = create_runner(db_session, model)
+
+    result = runner.run(
+        AgentRunRequest(
+            run_id=RUN_ID,
+            phase=RunPhase.WRITING,
+            agent_role=AgentRole.WRITER,
+            task="Write report.",
+            context={
+                "report_date": "2026-07-03",
+                "writing_context": {
+                    "selected_clusters": [
+                        {
+                            "id": "cl_openai_reasoning_api",
+                            "category": "early_signal",
+                            "report_bucket": "early_signals",
+                            "write_policy": "write_now",
+                            "title": "OpenAI reasoning API signal",
+                            "canonical_claim": (
+                                "OpenAI may be testing a reasoning-control API option."
+                            ),
+                            "evidence_ids": [
+                                "ev_openai_hn_reasoning",
+                                "ev_openai_wrapper_commit",
+                            ],
+                            "tickers": [],
+                            "topics": ["api", "reasoning"],
+                            "evaluation_decisions": ["select_early_signal"],
+                            "required_followups": ["Check official docs."],
+                            "missing_evidence": [],
+                        }
+                    ]
+                },
+            },
+        )
+    )
+
+    output = result.structured_output
+    draft = output.report_drafts[0]
+    item = draft.sections[0].items[0]
+    assert output.metadata["deterministic_fallback"] is True
+    assert draft.metadata["deterministic_fallback"] is True
+    assert item.cluster_ids == ["cl_openai_reasoning_api"]
+    assert item.evidence_ids == ["ev_openai_hn_reasoning", "ev_openai_wrapper_commit"]
+    assert item.uncertainty_label == "unconfirmed; requires follow-up"
     assert result.completion_trace_event.metadata["deterministic_structured_fallback"] is True
 
 
@@ -596,6 +697,113 @@ def test_agent_runner_normalizes_reviewer_pass_with_issues(db_session) -> None:
     assert output.required_changes == ["Missing evidence chain"]
     assert output.review_drafts[0].decision == ReviewDecision.REVISE
     assert output.review_drafts[0].metadata["normalized_decision_from"] == "pass"
+
+
+def test_agent_runner_normalizes_reviewer_issue_shape(db_session) -> None:
+    RunRepository(db_session).add(run_state_fixture())
+    model = ScriptedAgentScopeModel(
+        [
+            ChatResponse(
+                content=[
+                    TextBlock(
+                        text=json.dumps(
+                            {
+                                "reasoning_summary": "Reviewer found malformed issues.",
+                                "decision": "revise",
+                                "review_drafts": [
+                                    {
+                                        "decision": "revise",
+                                        "reasoning_summary": "One item needs better evidence.",
+                                        "issues": [
+                                            {
+                                                "problem": "Weak evidence chain",
+                                                "fix": "Add source-specific support.",
+                                                "priority": "high",
+                                            }
+                                        ],
+                                    }
+                                ],
+                            },
+                            ensure_ascii=False,
+                        )
+                    )
+                ],
+                is_last=True,
+            )
+        ]
+    )
+    runner = create_runner(db_session, model)
+
+    result = runner.run(
+        AgentRunRequest(
+            run_id=RUN_ID,
+            phase=RunPhase.REVIEWING,
+            agent_role=AgentRole.REVIEWER,
+            task="Review report.",
+        )
+    )
+
+    output = result.structured_output
+    issue = output.review_drafts[0].issues[0]
+    assert output.summary == "Reviewer requested revisions."
+    assert output.decision == ReviewDecision.REVISE
+    assert issue.priority == 1
+    assert issue.title == "Weak evidence chain"
+    assert issue.body == "Add source-specific support."
+    assert issue.metadata["normalized_issue_shape"] is True
+
+
+def test_agent_runner_normalizes_actionable_reviewer_reject_to_revise(db_session) -> None:
+    RunRepository(db_session).add(run_state_fixture())
+    model = ScriptedAgentScopeModel(
+        [
+            ChatResponse(
+                content=[
+                    TextBlock(
+                        text=json.dumps(
+                            {
+                                "summary": "Reviewer rejected but asked for revision.",
+                                "decision": "reject",
+                                "review_drafts": [
+                                    {
+                                        "decision": "reject",
+                                        "reasoning_summary": (
+                                            "Report needs revision before publication."
+                                        ),
+                                        "issues": [
+                                            {
+                                                "priority": 1,
+                                                "title": "Needs revision",
+                                                "body": "Fix the status label.",
+                                            }
+                                        ],
+                                    }
+                                ],
+                            },
+                            ensure_ascii=False,
+                        )
+                    )
+                ],
+                is_last=True,
+            )
+        ]
+    )
+    runner = create_runner(db_session, model)
+
+    result = runner.run(
+        AgentRunRequest(
+            run_id=RUN_ID,
+            phase=RunPhase.REVIEWING,
+            agent_role=AgentRole.REVIEWER,
+            task="Review report.",
+        )
+    )
+
+    output = result.structured_output
+    assert output.decision == ReviewDecision.REVISE
+    assert output.review_drafts[0].decision == ReviewDecision.REVISE
+    assert output.metadata["normalized_decision_from"] == "reject"
+    assert output.review_drafts[0].metadata["normalized_decision_from"] == "reject"
 
 
 def final_clusterer_repair_response(

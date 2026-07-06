@@ -9,7 +9,7 @@ from collections.abc import Callable
 from typing import Any, get_args, get_origin
 
 from agentscope.agent import Agent, ReActConfig
-from agentscope.message import Msg, UserMsg
+from agentscope.message import AssistantMsg, Msg, UserMsg
 from agentscope.model import ChatModelBase
 from pydantic import BaseModel
 from pydantic import ValidationError
@@ -17,10 +17,10 @@ from sqlalchemy.orm import Session
 
 from app.agents.agentscope_tools import AgentScopeToolBridge
 from app.agents.config import AgentRoleConfig
-from app.agents.outputs import ClustererOutput, ReviewerOutput, WriterOutput
+from app.agents.outputs import ClustererOutput, ReviewerOutput, ScoutOutput, WriterOutput
 from app.agents.registry import AgentRoleRegistry
 from app.agents.schemas import AgentRunRequest, AgentRunResult, AgentScopeExecutionError
-from app.domain import CandidateCategory, ReviewDecision, TraceEventType, TraceStatus
+from app.domain import CandidateCategory, EvidenceStrength, ReviewDecision, SignalStatus, TraceEventType, TraceStatus
 from app.services import TraceService
 from app.tools import ToolExecutor, ToolRegistry
 
@@ -64,7 +64,22 @@ class AgentRunner:
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            return asyncio.run(self.run_async(request))
+            # NOTE: asyncio.run() must be called from the main thread when using
+            # SQLite (check_same_thread). For production PostgreSQL deployments,
+            # this is not a constraint. If this method is ever invoked from a
+            # worker thread on Python 3.14+ Windows, replace with a
+            # threading.Thread + new_event_loop() pattern and ensure the DB
+            # driver supports cross-thread connections.
+            try:
+                return asyncio.run(self.run_async(request))
+            except RuntimeError as exc:
+                if "cannot be called from a worker thread" in str(exc).lower():
+                    raise AgentScopeExecutionError(
+                        "AgentRunner.run() called from a worker thread, which is "
+                        "not supported with the current database driver. Use "
+                        "AgentRunner.run_async() instead, or switch to PostgreSQL."
+                    ) from exc
+                raise
         raise AgentScopeExecutionError(
             "AgentRunner.run() cannot be called from an active event loop; "
             "use AgentRunner.run_async() instead."
@@ -108,17 +123,28 @@ class AgentRunner:
                 response = await coro
             output_text = self._extract_text(response)
             react_max_iters_repaired = False
+            deterministic_structured_fallback = False
             if self._is_react_max_iters_response(output_text):
-                response = await self._finalize_after_react_limit(
+                fallback_payload = self._deterministic_react_limit_fallback(
                     request=request,
                     config=config,
                     bridge=bridge,
                     original_output_text=output_text,
                 )
-                output_text = self._extract_text(response)
+                if fallback_payload is not None:
+                    output_text = json.dumps(fallback_payload, ensure_ascii=False)
+                    response = AssistantMsg(name=agent.name, content=output_text)
+                    deterministic_structured_fallback = True
+                else:
+                    response = await self._finalize_after_react_limit(
+                        request=request,
+                        config=config,
+                        bridge=bridge,
+                        original_output_text=output_text,
+                    )
+                    output_text = self._extract_text(response)
                 react_max_iters_repaired = True
             structured_output_repaired = False
-            deterministic_structured_fallback = False
             try:
                 structured_payload = self._normalize_payload_for_model(
                     config.output_model,
@@ -181,7 +207,7 @@ class AgentRunner:
                 reasoning_summary=structured_output.reasoning_summary,
                 output_payload=structured_output.model_dump(mode="json"),
                 metadata={
-                    "tool_call_count": len(bridge.executed_results),
+                    "tool_call_count": bridge.executed_result_count(),
                     "output_model": config.output_model.__name__,
                     "agentscope_agent": agent.name,
                     "no_tools": no_tools,
@@ -196,7 +222,7 @@ class AgentRunner:
                 agent_role=request.agent_role,
                 output_text=output_text,
                 structured_output=structured_output,
-                tool_results=list(bridge.executed_results),
+                tool_results=bridge.executed_results_snapshot(),
                 start_trace_event=start_event,
                 completion_trace_event=completion_event,
             )
@@ -219,6 +245,56 @@ class AgentRunner:
                     "timeout_seconds": config.execution.timeout_seconds,
                 },
             )
+            fallback_payload = self._deterministic_structured_fallback(
+                request=request,
+                config=config,
+                error=exc,
+            )
+            if fallback_payload is not None:
+                output_text = json.dumps(fallback_payload, ensure_ascii=False)
+                structured_payload = self._normalize_payload_for_model(
+                    config.output_model,
+                    fallback_payload,
+                )
+                structured_payload = self._repair_payload_with_context(
+                    config.output_model,
+                    structured_payload,
+                    request.context,
+                )
+                structured_output = config.output_model.model_validate(structured_payload)
+                completion_event = self.trace_service.record_event(
+                    run_id=request.run_id,
+                    phase=request.phase,
+                    agent_role=request.agent_role,
+                    event_type=TraceEventType.AGENT_COMPLETED,
+                    status=TraceStatus.SUCCEEDED,
+                    summary=(
+                        f"{config.display_name} completed with deterministic fallback "
+                        "after timeout."
+                    ),
+                    reasoning_summary=structured_output.reasoning_summary,
+                    output_payload=structured_output.model_dump(mode="json"),
+                    metadata={
+                        "tool_call_count": bridge.executed_result_count(),
+                        "output_model": config.output_model.__name__,
+                        "agentscope_agent": getattr(locals().get("agent"), "name", None),
+                        "no_tools": no_tools,
+                        "timeout_fallback": True,
+                        "structured_output_repaired": False,
+                        "deterministic_structured_fallback": True,
+                    },
+                )
+                self.session.flush()
+                return AgentRunResult(
+                    run_id=request.run_id,
+                    phase=request.phase,
+                    agent_role=request.agent_role,
+                    output_text=output_text,
+                    structured_output=structured_output,
+                    tool_results=bridge.executed_results_snapshot(),
+                    start_trace_event=start_event,
+                    completion_trace_event=completion_event,
+                )
             self.session.flush()
             raise AgentScopeExecutionError(timeout_message) from exc
         except Exception as exc:
@@ -242,6 +318,8 @@ class AgentRunner:
             if isinstance(exc, AgentScopeExecutionError):
                 raise
             raise AgentScopeExecutionError(error_message) from exc
+        finally:
+            await bridge.aclose()
 
     async def _finalize_after_react_limit(
         self,
@@ -264,7 +342,7 @@ class AgentRunner:
                 "starting no-tool structured finalization."
             ),
             input_payload={
-                "tool_call_count": len(bridge.executed_results),
+                "tool_call_count": bridge.executed_result_count(),
                 "evidence_ids": bridge.executed_evidence_ids(),
                 "original_output_text": original_output_text,
             },
@@ -301,6 +379,183 @@ class AgentRunner:
         )
         return response
 
+    def _deterministic_react_limit_fallback(
+        self,
+        *,
+        request: AgentRunRequest,
+        config: AgentRoleConfig,
+        bridge: AgentScopeToolBridge,
+        original_output_text: str | None,
+    ) -> dict[str, Any] | None:
+        """Build a conservative role-safe output when ReAct stops after tool use."""
+
+        if config.output_model is not ScoutOutput:
+            return None
+        payload = self._fallback_scout_payload(request, bridge)
+        if payload is None:
+            return None
+        self.trace_service.record_event(
+            run_id=request.run_id,
+            phase=request.phase,
+            agent_role=request.agent_role,
+            event_type=TraceEventType.AGENT_DECISION,
+            status=TraceStatus.SUCCEEDED,
+            summary=(
+                f"{config.display_name} used deterministic Scout fallback after "
+                "ReAct iteration limit."
+            ),
+            reasoning_summary=(
+                "The Scout had already produced tool evidence but did not return "
+                "structured JSON before the ReAct iteration boundary."
+            ),
+            input_payload={
+                "tool_call_count": bridge.executed_result_count(),
+                "evidence_ids": bridge.executed_evidence_ids(),
+                "original_output_text": original_output_text,
+            },
+            output_payload=payload,
+            metadata={
+                "agentscope_react_limit": True,
+                "repair_mode": "deterministic_scout_fallback",
+            },
+        )
+        return payload
+
+    @staticmethod
+    def _fallback_scout_payload(
+        request: AgentRunRequest,
+        bridge: AgentScopeToolBridge,
+    ) -> dict[str, Any] | None:
+        evidence_items = [
+            item
+            for result in bridge.executed_results_snapshot()
+            for item in result.evidence_items
+        ]
+        if not evidence_items:
+            return {
+                "summary": "Scout reached the ReAct boundary without usable tool evidence.",
+                "reasoning_summary": (
+                    "No tool evidence was available, so the safe fallback is to ask "
+                    "for follow-up rather than create a candidate."
+                ),
+                "candidate_drafts": [],
+                "followup_queries": ["Run a narrower source query for this Scout role."],
+                "metadata": {"deterministic_scout_fallback": True},
+            }
+
+        first = evidence_items[0]
+        evidence_ids = [item.id for item in evidence_items[:5]]
+        category, signal_status = AgentRunner._fallback_scout_category_status(
+            request.agent_role,
+            first.strength,
+        )
+        title = first.title or first.snippet or f"{request.agent_role.value} source signal"
+        snippet = first.snippet or title
+        followup = f"Verify and monitor source updates for: {title}"
+        draft: dict[str, Any] = {
+            "category": category.value,
+            "signal_status": signal_status.value,
+            "claim_summary": f"Source signal: {title}",
+            "entities": [],
+            "tickers": AgentRunner._fallback_tickers(title, snippet),
+            "topics": AgentRunner._fallback_scout_topics(request.agent_role),
+            "evidence_ids": evidence_ids,
+            "uncertainty": "medium",
+            "evidence_strength": AgentRunner._fallback_evidence_strength(
+                request.agent_role,
+                first.strength,
+            ).value,
+            "why_it_matters": (
+                "The source returned a bounded item relevant to this Scout role, "
+                "but the model hit its ReAct boundary before writing a full judgment."
+            ),
+            "potential_impact": (
+                "Requires follow-up before stronger conclusions; preserve as a "
+                "trackable signal with source lineage."
+            ),
+            "followup_questions": [followup],
+            "metadata": {"deterministic_scout_fallback": True},
+        }
+        if category == CandidateCategory.TECH_FINANCE and not (
+            draft["tickers"] or draft["potential_impact"]
+        ):
+            draft["potential_impact"] = "Potential AI infrastructure or market impact requires follow-up."
+
+        return {
+            "summary": f"Deterministically created one Scout candidate from {len(evidence_items)} evidence item(s).",
+            "reasoning_summary": (
+                "Fallback used existing tool evidence and conservative uncertainty "
+                "because ReAct reached its iteration boundary."
+            ),
+            "evidence_ids": evidence_ids,
+            "candidate_drafts": [draft],
+            "followup_queries": [followup],
+            "metadata": {"deterministic_scout_fallback": True},
+        }
+
+    @staticmethod
+    def _fallback_scout_category_status(
+        role: Any,
+        strength: EvidenceStrength,
+    ) -> tuple[CandidateCategory, SignalStatus]:
+        if role.value == "code_model_scout":
+            return CandidateCategory.CODE_MODEL, SignalStatus.CODE_ANOMALY
+        if role.value == "research_scout":
+            return CandidateCategory.RESEARCH, SignalStatus.RESEARCHER_HINT
+        if role.value == "official_scout":
+            return CandidateCategory.OFFICIAL_UPDATE, SignalStatus.OFFICIAL_CONFIRMATION
+        if role.value == "finance_scout":
+            if strength in {EvidenceStrength.OFFICIAL, EvidenceStrength.STRONG}:
+                return CandidateCategory.TECH_FINANCE, SignalStatus.CONFIRMED_FACT
+            return CandidateCategory.TECH_FINANCE, SignalStatus.SINGLE_SOURCE_SIGNAL
+        return CandidateCategory.EARLY_SIGNAL, SignalStatus.COMMUNITY_RUMOR
+
+    @staticmethod
+    def _fallback_evidence_strength(
+        role: Any,
+        strength: EvidenceStrength,
+    ) -> EvidenceStrength:
+        if role.value == "official_scout":
+            return EvidenceStrength.OFFICIAL
+        if role.value == "finance_scout" and strength == EvidenceStrength.UNKNOWN:
+            return EvidenceStrength.MODERATE
+        return strength if strength != EvidenceStrength.UNKNOWN else EvidenceStrength.WEAK
+
+    @staticmethod
+    def _fallback_scout_topics(role: Any) -> list[str]:
+        topics_by_role = {
+            "social_scout": ["community_signal"],
+            "code_model_scout": ["code_model_signal"],
+            "research_scout": ["research_signal"],
+            "official_scout": ["official_update"],
+            "finance_scout": ["tech_finance"],
+        }
+        return topics_by_role.get(role.value, ["frontier_signal"])
+
+    @staticmethod
+    def _fallback_tickers(*texts: str) -> list[str]:
+        known_tickers = {
+            "NVIDIA": "NVDA",
+            "NVDA": "NVDA",
+            "AMD": "AMD",
+            "TSMC": "TSM",
+            "TSM": "TSM",
+            "ASML": "ASML",
+            "Broadcom": "AVGO",
+            "AVGO": "AVGO",
+            "Microsoft": "MSFT",
+            "MSFT": "MSFT",
+            "Google": "GOOGL",
+            "Alphabet": "GOOGL",
+            "Meta": "META",
+            "Amazon": "AMZN",
+            "Oracle": "ORCL",
+        }
+        joined = " ".join(texts)
+        return AgentRunner._dedupe_strings(
+            [ticker for marker, ticker in known_tickers.items() if marker.lower() in joined.lower()]
+        )
+
     def _deterministic_structured_fallback(
         self,
         *,
@@ -310,24 +565,39 @@ class AgentRunner:
     ) -> dict[str, Any] | None:
         """Build a conservative structured fallback for roles with safe rules."""
 
-        if config.output_model is not ClustererOutput:
-            return None
-        candidate_context = request.context.get("candidate_context")
-        if not isinstance(candidate_context, list) or not candidate_context:
+        if config.output_model is ClustererOutput:
+            candidate_context = request.context.get("candidate_context")
+            if not isinstance(candidate_context, list) or not candidate_context:
+                return None
+            payload = self._fallback_clusterer_payload(candidate_context)
+            summary = "Clusterer used deterministic fallback after AgentScope JSON repair failed."
+            reasoning_summary = (
+                "AgentScope produced malformed JSON twice; harness grouped candidates "
+                "conservatively by category and leading entity/ticker/topic."
+            )
+        elif config.output_model is WriterOutput:
+            writing_context = request.context.get("writing_context")
+            if not isinstance(writing_context, dict):
+                return None
+            payload = self._fallback_writer_payload(writing_context, request.context)
+            if payload is None:
+                return None
+            summary = "Writer used deterministic fallback after AgentScope JSON repair failed."
+            reasoning_summary = (
+                "AgentScope produced malformed report JSON twice; harness rendered a "
+                "conservative report from selected clusters, evaluations, and evidence."
+            )
+        else:
             return None
 
-        payload = self._fallback_clusterer_payload(candidate_context)
         self.trace_service.record_event(
             run_id=request.run_id,
             phase=request.phase,
             agent_role=request.agent_role,
             event_type=TraceEventType.AGENT_DECISION,
             status=TraceStatus.SUCCEEDED,
-            summary="Clusterer used deterministic fallback after AgentScope JSON repair failed.",
-            reasoning_summary=(
-                "AgentScope produced malformed JSON twice; harness grouped candidates "
-                "conservatively by category and leading entity/ticker/topic."
-            ),
+            summary=summary,
+            reasoning_summary=reasoning_summary,
             output_payload=payload,
             metadata={
                 "repair_mode": "deterministic_structured_fallback",
@@ -429,6 +699,173 @@ class AgentRunner:
             "cluster_drafts": cluster_drafts,
             "metadata": {"deterministic_fallback": True},
         }
+
+    @staticmethod
+    def _fallback_writer_payload(
+        writing_context: dict[str, Any],
+        request_context: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        selected_clusters = writing_context.get("selected_clusters")
+        if not isinstance(selected_clusters, list) or not selected_clusters:
+            return None
+
+        sections_by_id: dict[str, dict[str, Any]] = {}
+        overview: list[str] = []
+        tomorrow_focus: list[str] = []
+        for cluster in selected_clusters:
+            if not isinstance(cluster, dict):
+                continue
+            evidence_ids = cluster.get("evidence_ids")
+            cluster_id = cluster.get("id")
+            category = str(cluster.get("category") or CandidateCategory.OTHER.value)
+            if not cluster_id or not isinstance(evidence_ids, list) or not evidence_ids:
+                continue
+            bucket = str(cluster.get("report_bucket") or AgentRunner._fallback_report_bucket(category))
+            section = sections_by_id.setdefault(
+                bucket,
+                {
+                    "section_id": bucket,
+                    "title": AgentRunner._fallback_section_title(bucket),
+                    "items": [],
+                },
+            )
+            title = str(cluster.get("title") or cluster.get("canonical_claim") or cluster_id)
+            claim = str(cluster.get("canonical_claim") or title)
+            required_followups = AgentRunner._dedupe_strings(
+                [
+                    str(item)
+                    for item in (
+                        cluster.get("required_followups")
+                        if isinstance(cluster.get("required_followups"), list)
+                        else []
+                    )
+                    if str(item).strip()
+                ]
+            )
+            missing_evidence = AgentRunner._dedupe_strings(
+                [
+                    str(item)
+                    for item in (
+                        cluster.get("missing_evidence")
+                        if isinstance(cluster.get("missing_evidence"), list)
+                        else []
+                    )
+                    if str(item).strip()
+                ]
+            )
+            followups = (required_followups or missing_evidence or ["Track source updates."])[:5]
+            tomorrow_focus.extend(followups[:2])
+            overview.append(title)
+            item = {
+                "title": title[:180],
+                "category": category,
+                "status_label": AgentRunner._fallback_status_label(category, cluster),
+                "core_information": claim,
+                "why_it_matters": AgentRunner._fallback_why_it_matters(cluster),
+                "potential_impact": AgentRunner._fallback_potential_impact(cluster),
+                "key_data": AgentRunner._fallback_key_data(cluster),
+                "tickers": (
+                    cluster.get("tickers")
+                    if isinstance(cluster.get("tickers"), list)
+                    else []
+                ),
+                "evidence_ids": [str(evidence_id) for evidence_id in evidence_ids],
+                "cluster_ids": [str(cluster_id)],
+                "followup_points": followups,
+                "metadata": {"deterministic_fallback": True},
+            }
+            if category == CandidateCategory.EARLY_SIGNAL.value:
+                item["uncertainty_label"] = "unconfirmed; requires follow-up"
+            section["items"].append(item)
+
+        sections = [section for section in sections_by_id.values() if section["items"]]
+        if not sections:
+            return None
+
+        focus = AgentRunner._dedupe_strings(tomorrow_focus)[:5]
+        if not focus:
+            focus = ["Review selected clusters for source updates."]
+        report_date = str(request_context.get("report_date") or "unknown date")
+        return {
+            "summary": "Deterministically drafted report from selected clusters.",
+            "reasoning_summary": (
+                "Fallback report includes every selected cluster with caveats and "
+                "source lineage after model JSON could not be parsed."
+            ),
+            "markdown_preview": None,
+            "report_drafts": [
+                {
+                    "title": f"Connor.ai Daily Intelligence — {report_date}",
+                    "sections": sections,
+                    "overview_judgments": overview[:3],
+                    "tomorrow_focus": focus,
+                    "metadata": {"deterministic_fallback": True},
+                }
+            ],
+            "metadata": {"deterministic_fallback": True},
+        }
+
+    @staticmethod
+    def _fallback_report_bucket(category: str) -> str:
+        if category in {
+            CandidateCategory.CONFIRMED_EVENT.value,
+            CandidateCategory.OFFICIAL_UPDATE.value,
+        }:
+            return "confirmed_events"
+        if category == CandidateCategory.TECH_FINANCE.value:
+            return "tech_finance"
+        return "early_signals"
+
+    @staticmethod
+    def _fallback_section_title(bucket: str) -> str:
+        titles = {
+            "early_signals": "Early Signals",
+            "confirmed_events": "Confirmed Events",
+            "tech_finance": "Tech-Finance",
+        }
+        return titles.get(bucket, bucket.replace("_", " ").title())
+
+    @staticmethod
+    def _fallback_status_label(category: str, cluster: dict[str, Any]) -> str:
+        policy = str(cluster.get("write_policy") or "")
+        if category in {
+            CandidateCategory.CONFIRMED_EVENT.value,
+            CandidateCategory.OFFICIAL_UPDATE.value,
+        }:
+            return "Confirmed; details may need follow-up"
+        if category == CandidateCategory.TECH_FINANCE.value:
+            return "Tech-finance signal; verify extracted figures"
+        if policy == "write_with_caveat":
+            return "Unconfirmed signal; write with caveat"
+        return "Unconfirmed signal"
+
+    @staticmethod
+    def _fallback_why_it_matters(cluster: dict[str, Any]) -> str:
+        decisions = cluster.get("evaluation_decisions")
+        topics = cluster.get("topics")
+        parts = []
+        if isinstance(decisions, list) and decisions:
+            parts.append(f"Evaluator decisions: {', '.join(str(item) for item in decisions)}.")
+        if isinstance(topics, list) and topics:
+            parts.append(f"Relevant topics: {', '.join(str(item) for item in topics[:5])}.")
+        parts.append("Connor selected this cluster for daily intelligence coverage.")
+        return " ".join(parts)
+
+    @staticmethod
+    def _fallback_potential_impact(cluster: dict[str, Any]) -> str:
+        tickers = cluster.get("tickers")
+        if isinstance(tickers, list) and tickers:
+            return f"Potentially relevant to {', '.join(str(item) for item in tickers)}."
+        return "Potential impact depends on confirmation, adoption, or follow-up evidence."
+
+    @staticmethod
+    def _fallback_key_data(cluster: dict[str, Any]) -> list[str]:
+        values = []
+        for key in ("missing_evidence", "required_followups"):
+            items = cluster.get(key)
+            if isinstance(items, list):
+                values.extend(str(item) for item in items if str(item).strip())
+        return AgentRunner._dedupe_strings(values)[:5]
 
     @staticmethod
     def _fallback_title(category: str, key_label: str, claim: str) -> str:
@@ -705,6 +1142,8 @@ class AgentRunner:
             return payload
 
         repaired = dict(payload)
+        if not str(repaired.get("summary") or "").strip():
+            repaired["summary"] = cls._fallback_reviewer_summary(repaired)
         review_drafts = []
         any_revise = False
         synthesized_changes: list[str] = []
@@ -712,7 +1151,17 @@ class AgentRunner:
             if not isinstance(draft, dict):
                 continue
             next_draft = dict(draft)
-            issues = next_draft.get("issues") if isinstance(next_draft.get("issues"), list) else []
+            issues = [
+                cls._repair_review_issue_payload(issue)
+                for issue in (
+                    next_draft.get("issues")
+                    if isinstance(next_draft.get("issues"), list)
+                    else []
+                )
+                if isinstance(issue, dict)
+            ]
+            if issues:
+                next_draft["issues"] = issues
             required_changes = (
                 next_draft.get("required_changes")
                 if isinstance(next_draft.get("required_changes"), list)
@@ -732,8 +1181,36 @@ class AgentRunner:
                     "normalized_decision_from": ReviewDecision.PASS.value,
                     "normalized_decision_reason": "pass review draft included issues or required changes",
                 }
+            elif decision == ReviewDecision.REJECT.value and has_changes:
+                next_draft["decision"] = ReviewDecision.REVISE.value
+                any_revise = True
+                metadata = next_draft.get("metadata")
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                next_draft["metadata"] = {
+                    **metadata,
+                    "normalized_decision_from": ReviewDecision.REJECT.value,
+                    "normalized_decision_reason": (
+                        "reject review draft included actionable issues or required changes"
+                    ),
+                }
             elif decision == ReviewDecision.REVISE.value:
                 any_revise = True
+            elif decision == ReviewDecision.REOPEN_COLLECT.value and not has_changes:
+                next_draft["required_changes"] = [
+                    "Reviewer requested reopening collection without specific required changes."
+                ]
+                metadata = next_draft.get("metadata")
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                next_draft["metadata"] = {
+                    **metadata,
+                    "normalized_decision_from": ReviewDecision.REOPEN_COLLECT.value,
+                    "normalized_decision_reason": (
+                        "reopen_collect review draft lacked issues or required changes"
+                    ),
+                }
+                has_changes = True
 
             if next_draft.get("decision") == ReviewDecision.REVISE.value and not required_changes:
                 issue_changes = cls._review_issue_change_titles(issues)
@@ -746,16 +1223,122 @@ class AgentRunner:
         if review_drafts:
             repaired["review_drafts"] = review_drafts
         if any_revise:
-            if repaired.get("decision") == ReviewDecision.PASS.value:
+            if repaired.get("decision") in {
+                ReviewDecision.PASS.value,
+                ReviewDecision.REJECT.value,
+            }:
                 repaired["metadata"] = {
                     **(repaired.get("metadata") if isinstance(repaired.get("metadata"), dict) else {}),
-                    "normalized_decision_from": ReviewDecision.PASS.value,
-                    "normalized_decision_reason": "one or more review drafts require revision",
+                    "normalized_decision_from": repaired.get("decision"),
+                    "normalized_decision_reason": (
+                        "one or more review drafts require revision"
+                    ),
                 }
             repaired["decision"] = ReviewDecision.REVISE.value
             if not repaired.get("required_changes") and synthesized_changes:
                 repaired["required_changes"] = cls._dedupe_strings(synthesized_changes)
         return repaired
+
+    @staticmethod
+    def _fallback_reviewer_summary(payload: dict[str, Any]) -> str:
+        decision = str(payload.get("decision") or ReviewDecision.REVISE.value)
+        if decision == ReviewDecision.PASS.value:
+            return "Reviewer passed the report."
+        return "Reviewer requested revisions."
+
+    @classmethod
+    def _repair_review_issue_payload(cls, issue: dict[str, Any]) -> dict[str, Any]:
+        repaired = dict(issue)
+        extra_fields = cls._metadata_extra_fields(repaired)
+
+        title = cls._first_non_empty_string(
+            repaired.get("title"),
+            repaired.get("summary"),
+            repaired.get("issue"),
+            repaired.get("problem"),
+            repaired.get("required_change"),
+            extra_fields.get("title"),
+            extra_fields.get("summary"),
+            extra_fields.get("issue"),
+            extra_fields.get("problem"),
+            extra_fields.get("required_change"),
+            extra_fields.get("finding"),
+        )
+        body = cls._first_non_empty_string(
+            repaired.get("body"),
+            repaired.get("description"),
+            repaired.get("details"),
+            repaired.get("recommendation"),
+            repaired.get("fix"),
+            extra_fields.get("body"),
+            extra_fields.get("description"),
+            extra_fields.get("details"),
+            extra_fields.get("recommendation"),
+            extra_fields.get("fix"),
+            title,
+        )
+        priority = cls._coerce_review_issue_priority(
+            repaired.get("priority", extra_fields.get("priority"))
+        )
+
+        if title:
+            repaired["title"] = title[:160]
+        if body:
+            repaired["body"] = body
+        repaired["priority"] = priority
+
+        if "metadata" not in repaired or not isinstance(repaired["metadata"], dict):
+            repaired["metadata"] = {}
+        repaired["metadata"] = {
+            **repaired["metadata"],
+            "normalized_issue_shape": True,
+        }
+        return repaired
+
+    @staticmethod
+    def _metadata_extra_fields(payload: dict[str, Any]) -> dict[str, Any]:
+        metadata = payload.get("metadata")
+        if not isinstance(metadata, dict):
+            return {}
+        extra_fields = metadata.get("extra_fields")
+        return extra_fields if isinstance(extra_fields, dict) else {}
+
+    @staticmethod
+    def _first_non_empty_string(*values: Any) -> str | None:
+        for value in values:
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            if isinstance(value, list):
+                joined = "; ".join(str(item).strip() for item in value if str(item).strip())
+                if joined:
+                    return joined
+            if isinstance(value, dict):
+                joined = "; ".join(
+                    f"{key}: {val}"
+                    for key, val in value.items()
+                    if str(key).strip() and str(val).strip()
+                )
+                if joined:
+                    return joined
+        return None
+
+    @staticmethod
+    def _coerce_review_issue_priority(value: Any) -> int:
+        if isinstance(value, int):
+            return max(0, min(3, value))
+        if isinstance(value, float):
+            return max(0, min(3, int(value)))
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized.isdigit():
+                return max(0, min(3, int(normalized)))
+            if normalized in {"critical", "high", "p0", "p1"}:
+                return 1
+            if normalized in {"medium", "moderate", "p2"}:
+                return 2
+            if normalized in {"low", "minor", "p3"}:
+                return 3
+        return 2
 
     @staticmethod
     def _review_issue_change_titles(issues: list[Any]) -> list[str]:

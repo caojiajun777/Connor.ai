@@ -1,12 +1,12 @@
 # Connor.ai Progress Tracker
 
-Last updated: 2026-07-05
+Last updated: 2026-07-06
 
 ## Current Status
 
-Project state: Phase 14 in progress. Connor.ai now has five real public source groups wired through ToolExecutor, evidence persistence, artifacts, and trace: GitHub / Hugging Face for code and model signals, arXiv / OpenReview for research signals, official feed / API changelog tools for confirmed first-party updates, SEC / investor-relations tools for finance signals, and Hacker News for community signals.
+Project state: Phase 15B complete. Connor.ai now has evidence URL deduplication, calibrated evaluator write-policies, SEC filing content extraction, finance figure context enrichment, and report usefulness tuning. The system can produce business-calibrated daily intelligence reports.
 
-Next phase work: continue Phase 14 source expansion with Reddit / X / other social-source tools after rate-limit, authentication, and content-policy boundaries are explicit.
+Next phase work: Worker, queue, and Dashboard production layers (Phase 16).
 
 ## Phase Progress
 
@@ -25,7 +25,31 @@ Next phase work: continue Phase 14 source expansion with Reddit / X / other soci
 | 11 | Watchlist + Archive + Intelligence Threads | Complete | Watchlist Agent output, lifecycle service, TTL archive, thread updates, and closed-loop test delivered. |
 | 12 | Writing Loop | Complete | Writer/Reviewer/Editor draft materialization, report JSON/markdown/evidence map generation, reviewer uncertainty guard, and closed-loop tests delivered. |
 | 13 | FastAPI and Dashboard Contract | Complete | FastAPI app, dashboard response schemas, run/report/trace/cluster/watchlist/thread endpoints, and API tests delivered. |
-| 14 | Source Expansion | In progress | GitHub / Hugging Face, arXiv / OpenReview, official blog / API changelog, SEC / IR, and Hacker News source tools complete; Reddit / X social boundaries next. |
+| 14 | Source Expansion | In progress | GitHub / Hugging Face, arXiv / OpenReview, official blog / API changelog, SEC / IR, and Hacker News source tools complete; Reddit / X social boundaries deferred until auth/policy boundaries are explicit. |
+| 15A | Report Quality and Selection Hardening | Complete | Collect gate enforces report-bucket coverage; writer context includes quality contract; finalization blocks missing selected clusters/buckets/tomorrow focus; smoke test passes. |
+| 15B | Business Quality Calibration | Complete | Evidence URL dedup, evaluator write-policy calibration, SEC filing content extraction, finance figure YoY context, report usefulness tuning (source diversity, impact chains, follow-up specificity). |
+
+## Phase 15B Results
+
+Delivered:
+
+- Evidence URL deduplication in `ToolExecutor._persist_evidence()` with URL normalization (trailing slash, scheme, www).
+- `EvidenceRepository.list_urls_in_run()` query for efficient dedup lookups.
+- `WritePolicy` enum and `write_policy` field on `EvaluationResult` with calibrated mapping from decisions and scores.
+- `_calibrate_write_policy()` in `EvaluatorOutputMaterializer` — selects write_now, write_with_caveat, archive, do_not_write, or context_only.
+- `WritingTaskFactory._write_policy()` consumes persisted write_policy with legacy fallback.
+- Alembic migration `0002_add_write_policy_to_evaluations.py`.
+- `sec_filing_content_tool()` — fetches EDGAR filing HTML, extracts Risk Factors / MD&A / Business sections.
+- `_format_financial_value()` helper producing human-readable numbers ($13.1B, $500M).
+- YoY comparison enrichment in `sec_company_facts_tool()` with `with_context` parameter.
+- Source diversity tracking, impact chain requirements, and follow-up specificity rules in writer context.
+- `_repair_generic_followups()` guard replacing vague follow-ups with context-specific alternatives.
+- New tests: 5 dedup tests, updated finance formatting test.
+
+Checks:
+
+- `python -m pytest tests/ --ignore=tests/smoke -q`: 182 passed.
+- `python -m compileall app tests`: passed.
 
 ## Phase 1 Results
 
@@ -330,13 +354,14 @@ Checks:
 
 ## Immediate Next Step
 
-Continue Phase 14: Reddit / X / social-source boundaries.
+Start Phase 15B: business quality calibration.
 
 Initial scope:
 
-- Add authenticated community-source tools through the same public source boundary after rate-limit, authentication, and content-policy behavior is explicit.
-- Preserve the same tool envelope, evidence, artifact, and trace contracts.
-- Keep live network calls out of tests by injecting fake clients.
+- Deduplicate evidence by URL / canonical source so one cluster does not over-count repeated feed items.
+- Calibrate evaluator decisions into explicit `write_policy` values for `write_now`, `write_with_caveat`, `watch_only`, and `archive`.
+- Improve Tech-Finance quality by extracting actual SEC filing content and finance figures instead of stopping at filing metadata.
+- Tune report usefulness: source diversity, sharper impact chains, fewer generic follow-ups, and clearer watchlist promotion / expiry rules.
 
 ## Definition of Done for Each Phase
 

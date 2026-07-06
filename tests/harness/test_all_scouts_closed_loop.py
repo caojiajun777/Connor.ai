@@ -247,6 +247,34 @@ def confirmed_event_finance_response(
     return categorized_finance_response("confirmed_event")(messages, tools, call_index)
 
 
+def official_confirmation_finance_response(
+    messages: list[Msg],
+    _tools: list[dict] | None,
+    _call_index: int,
+) -> ChatResponse:
+    evidence_ids = evidence_ids_from_messages(messages)
+    payload = scout_payload(AgentRole.FINANCE_SCOUT, evidence_ids)
+    payload["candidate_drafts"][0]["signal_status"] = "official_confirmation"
+    return ChatResponse(
+        content=[TextBlock(text=json.dumps(payload, ensure_ascii=False))],
+        is_last=True,
+    )
+
+
+def unconfirmed_leak_finance_response(
+    messages: list[Msg],
+    _tools: list[dict] | None,
+    _call_index: int,
+) -> ChatResponse:
+    evidence_ids = evidence_ids_from_messages(messages)
+    payload = scout_payload(AgentRole.FINANCE_SCOUT, evidence_ids)
+    payload["candidate_drafts"][0]["signal_status"] = "unconfirmed_leak"
+    return ChatResponse(
+        content=[TextBlock(text=json.dumps(payload, ensure_ascii=False))],
+        is_last=True,
+    )
+
+
 def official_response_without_followups(
     messages: list[Msg],
     _tools: list[dict] | None,
@@ -393,6 +421,110 @@ def test_materializer_normalizes_finance_categories_to_tech_finance(
     assert len(candidates) == 1
     assert candidates[0].category == "tech_finance"
     assert candidates[0].metadata["normalized_category_from"] == category
+
+
+def test_materializer_normalizes_finance_official_confirmation_status(db_session) -> None:
+    tool_registry = create_default_tool_registry()
+    role_registry = create_default_agent_role_registry(tool_registry)
+    model = ScriptedScoutModel(
+        AgentRole.FINANCE_SCOUT,
+        [
+            manual_seed_tool_call(AgentRole.FINANCE_SCOUT),
+            official_confirmation_finance_response,
+        ],
+    )
+    agent_runner = AgentRunner(
+        db_session,
+        role_registry=role_registry,
+        tool_registry=tool_registry,
+        model_factory=lambda _config: model,
+    )
+    daily_harness = DailyRunHarness(
+        db_session,
+        agent_runner=agent_runner,
+        config=HarnessConfig(min_selected_items=1),
+    )
+    fixture = run_state_fixture()
+    run = daily_harness.create_run(
+        run_id=RUN_ID,
+        report_date=fixture.report_date,
+        objective=fixture.objective,
+        budgets=RunBudgets(max_collect_rounds=1),
+    )
+
+    CollectLoopHarness(daily_harness.context).run(
+        run,
+        tasks_by_phase={
+            RunPhase.SCOUTING: [
+                ScoutTaskFactory().create_task(
+                    AgentRole.FINANCE_SCOUT,
+                    objective=fixture.objective,
+                )
+            ]
+        },
+    )
+
+    candidates = CandidateRepository(db_session).list_by_run(RUN_ID)
+    assert len(candidates) == 1
+    assert candidates[0].category == "tech_finance"
+    assert candidates[0].signal_status == "confirmed_fact"
+    assert candidates[0].metadata["normalized_signal_status_from"] == "official_confirmation"
+    assert (
+        candidates[0].metadata["normalized_signal_status_reason"]
+        == "finance_scout_status_boundary"
+    )
+
+
+def test_materializer_normalizes_finance_leak_status_to_single_source(db_session) -> None:
+    tool_registry = create_default_tool_registry()
+    role_registry = create_default_agent_role_registry(tool_registry)
+    model = ScriptedScoutModel(
+        AgentRole.FINANCE_SCOUT,
+        [
+            manual_seed_tool_call(AgentRole.FINANCE_SCOUT),
+            unconfirmed_leak_finance_response,
+        ],
+    )
+    agent_runner = AgentRunner(
+        db_session,
+        role_registry=role_registry,
+        tool_registry=tool_registry,
+        model_factory=lambda _config: model,
+    )
+    daily_harness = DailyRunHarness(
+        db_session,
+        agent_runner=agent_runner,
+        config=HarnessConfig(min_selected_items=1),
+    )
+    fixture = run_state_fixture()
+    run = daily_harness.create_run(
+        run_id=RUN_ID,
+        report_date=fixture.report_date,
+        objective=fixture.objective,
+        budgets=RunBudgets(max_collect_rounds=1),
+    )
+
+    CollectLoopHarness(daily_harness.context).run(
+        run,
+        tasks_by_phase={
+            RunPhase.SCOUTING: [
+                ScoutTaskFactory().create_task(
+                    AgentRole.FINANCE_SCOUT,
+                    objective=fixture.objective,
+                )
+            ]
+        },
+    )
+
+    candidates = CandidateRepository(db_session).list_by_run(RUN_ID)
+    assert len(candidates) == 1
+    assert candidates[0].category == "tech_finance"
+    assert candidates[0].signal_status == "single_source_signal"
+    assert candidates[0].metadata["normalized_signal_status_from"] == "unconfirmed_leak"
+    assert (
+        candidates[0].metadata["normalized_signal_status_reason"]
+        == "finance_scout_status_boundary"
+    )
 
 
 def test_materializer_adds_default_followup_for_official_scout(db_session) -> None:

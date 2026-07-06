@@ -205,6 +205,44 @@ def test_evaluator_skips_cluster_category_owned_by_another_profile(db_session) -
     assert timeline.events[-1].metadata["skip_reason"] == "ineligible_cluster_category"
 
 
+def test_evaluator_skips_missing_cluster_id(db_session) -> None:
+    context = HarnessContext(db_session)
+    run = run_state_fixture()
+    context.runs.add(run)
+
+    materializer = EvaluatorOutputMaterializer(context)
+    materialized = materializer.materialize(
+        run=run,
+        phase=RunPhase.EVALUATING,
+        agent_role=AgentRole.FRONTIER_EVALUATOR,
+        result=_result(
+            role=AgentRole.FRONTIER_EVALUATOR,
+            draft=EvaluationDraft(
+                cluster_id="missing_cluster",
+                evaluator_type=EvaluationType.FRONTIER,
+                dimension_scores={
+                    "information_gap": 8,
+                    "specificity": 7,
+                    "source_proximity": 4,
+                    "potential_impact": 8,
+                    "trackability": 9,
+                },
+                total_score=7.2,
+                decision=EvaluationDecision.SELECT_EARLY_SIGNAL,
+                reasoning_summary="This draft targets a missing cluster.",
+            ),
+        ),
+    )
+
+    evaluations = EvaluationRepository(db_session).list_by_run(RUN_ID)
+    timeline = TraceService(db_session).reconstruct_timeline(RUN_ID)
+
+    assert materialized.evaluation_ids == []
+    assert evaluations == []
+    assert timeline.events[-1].status == TraceStatus.SKIPPED
+    assert timeline.events[-1].metadata["skip_reason"] == "missing_or_wrong_run_cluster"
+
+
 def test_evaluator_normalizes_summed_or_percent_scores(db_session) -> None:
     context = HarnessContext(db_session)
     run = run_state_fixture()

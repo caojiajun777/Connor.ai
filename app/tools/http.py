@@ -153,7 +153,7 @@ class JsonHttpClient:
         if not body:
             return None
         try:
-            return json.loads(body.decode("utf-8"))
+            return json.loads(body.decode("utf-8", errors="replace"))
         except json.JSONDecodeError as exc:
             raise SourceHttpError("response did not contain valid JSON", retryable=False) from exc
 

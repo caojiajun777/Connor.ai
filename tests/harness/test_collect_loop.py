@@ -1,11 +1,29 @@
 """Collect loop harness tests."""
 
-from app.domain import RunBudgets
-from app.harness import CollectGateOutcome, CollectLoopHarness, HarnessConfig, HarnessContext
+import pytest
+
+from app.agents import AgentRunRequest, AgentScopeExecutionError
+from app.domain import AgentRole, RunBudgets, RunPhase
+from app.harness import (
+    AgentTask,
+    CollectGateOutcome,
+    CollectLoopHarness,
+    HarnessConfig,
+    HarnessContext,
+)
 from app.repositories import ArtifactRepository, RunRepository
 from app.services import TraceService
 from tests.domain.fixtures import RUN_ID, early_signal_bundle, run_state_fixture
 from tests.harness.helpers import persist_bundle
+
+
+class FailingScoutAgentRunner:
+    def __init__(self):
+        self.calls: list[AgentRunRequest] = []
+
+    def run(self, request: AgentRunRequest):
+        self.calls.append(request)
+        raise AgentScopeExecutionError("scout model timed out")
 
 
 def test_collect_loop_enters_writing_with_selected_evaluation(db_session) -> None:
@@ -38,3 +56,68 @@ def test_collect_loop_pauses_when_budget_exhausted(db_session) -> None:
     assert next_run.status == "paused"
     assert decisions[-1].outcome == CollectGateOutcome.NEEDS_MANUAL_REVIEW
     assert next_run.metadata["manual_review_required"] is True
+
+
+def test_collect_loop_continues_when_scout_agent_execution_fails(db_session) -> None:
+    run = run_state_fixture().model_copy(update={"budgets": RunBudgets(max_collect_rounds=1)})
+    RunRepository(db_session).add(run)
+    agent_runner = FailingScoutAgentRunner()
+    context = HarnessContext(
+        db_session,
+        agent_runner=agent_runner,
+        config=HarnessConfig(min_selected_items=1),
+    )
+
+    next_run, decisions = CollectLoopHarness(context).run(
+        run,
+        tasks_by_phase={
+            RunPhase.SCOUTING: [
+                AgentTask(
+                    agent_role=AgentRole.SOCIAL_SCOUT,
+                    phase=RunPhase.SCOUTING,
+                    task="Scout with a forced runtime failure.",
+                )
+            ],
+        },
+    )
+
+    assert len(agent_runner.calls) == 1
+    assert next_run.status == "paused"
+    assert decisions[-1].outcome == CollectGateOutcome.NEEDS_MANUAL_REVIEW
+    timeline = TraceService(db_session).reconstruct_timeline(RUN_ID)
+    assert any(
+        event.summary == "Harness dispatching social_scout task."
+        and event.metadata["task_progress"] is True
+        and event.metadata["task_index"] == 1
+        for event in timeline.events
+    )
+    assert any(
+        event.summary == "Scout task failed; continuing collect."
+        and event.status == "failed"
+        and event.metadata["skipped_task"] is True
+        for event in timeline.events
+    )
+
+
+def test_collect_loop_can_fail_fast_on_scout_agent_execution_error(db_session) -> None:
+    run = run_state_fixture().model_copy(update={"budgets": RunBudgets(max_collect_rounds=1)})
+    RunRepository(db_session).add(run)
+    context = HarnessContext(
+        db_session,
+        agent_runner=FailingScoutAgentRunner(),
+        config=HarnessConfig(min_selected_items=1, continue_on_scout_agent_error=False),
+    )
+
+    with pytest.raises(AgentScopeExecutionError, match="scout model timed out"):
+        CollectLoopHarness(context).run(
+            run,
+            tasks_by_phase={
+                RunPhase.SCOUTING: [
+                    AgentTask(
+                        agent_role=AgentRole.SOCIAL_SCOUT,
+                        phase=RunPhase.SCOUTING,
+                        task="Scout with a forced runtime failure.",
+                    )
+                ],
+            },
+        )

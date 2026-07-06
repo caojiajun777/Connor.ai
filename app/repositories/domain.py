@@ -57,6 +57,16 @@ class EvidenceRepository(DomainRepository[EvidenceItem, EvidenceItemRecord]):
             raw_hash=obj.raw_hash,
         )
 
+    def list_urls_in_run(self, run_id: str) -> set[str]:
+        """Return the set of non-null, non-empty URLs already persisted for a run."""
+        stmt = select(EvidenceItemRecord.url).where(
+            EvidenceItemRecord.run_id == run_id,
+            EvidenceItemRecord.url.isnot(None),
+            EvidenceItemRecord.url != "",
+        )
+        rows = self.session.execute(stmt).all()
+        return {row[0] for row in rows if row[0]}
+
 
 class CandidateRepository(DomainRepository[CandidateItem, CandidateItemRecord]):
     domain_model = CandidateItem
@@ -110,6 +120,7 @@ class EvaluationRepository(DomainRepository[EvaluationResult, EvaluationResultRe
             total_score=obj.total_score,
             decision=enum_value(obj.decision),
             reasoning_summary=obj.reasoning_summary,
+            write_policy=enum_value(obj.write_policy) if obj.write_policy else None,
         )
 
     def list_by_cluster(self, cluster_id: str) -> list[EvaluationResult]:
@@ -191,6 +202,12 @@ class IntelligenceThreadRepository(
             status=enum_value(obj.status),
             importance=enum_value(obj.importance),
             current_thesis=obj.current_thesis,
+        )
+
+    def list_by_run(self, run_id: str) -> list[IntelligenceThread]:
+        raise NotImplementedError(
+            "IntelligenceThread is cross-run and does not have a single run_id. "
+            "Use list_by_statuses() instead."
         )
 
     def list_by_status(self, status: str) -> list[IntelligenceThread]:

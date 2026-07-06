@@ -14,6 +14,6 @@ class EventClusterRecord(DomainPayloadMixin, Base):
     category: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     canonical_claim: Mapped[str] = mapped_column(Text, nullable=False)
-    dedupe_key: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    dedupe_key: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     selected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
 

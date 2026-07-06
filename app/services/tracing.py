@@ -294,7 +294,7 @@ class TraceService:
             tool_call_id=tool_call.id,
             duration_ms=duration_ms,
             error=error,
-            metadata={"query": query, **(metadata or {})},
+            metadata={**(metadata or {}), "query": query},
             event_id=trace_id,
             occurred_at=ended_at or started_at,
         )

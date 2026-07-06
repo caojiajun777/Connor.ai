@@ -14,7 +14,20 @@ def create_engine_from_url(url: str | None = None) -> Engine:
 
     database_url = url or get_settings().database_url
     connect_args = {"check_same_thread": False} if database_url.startswith("sqlite") else {}
-    return create_engine(database_url, connect_args=connect_args, future=True)
+    if database_url.startswith("sqlite"):
+        connect_args["check_same_thread"] = False
+    engine_instance = create_engine(database_url, connect_args=connect_args, future=True)
+
+    if database_url.startswith("sqlite"):
+        from sqlalchemy import event
+
+        @event.listens_for(engine_instance, "connect")
+        def _set_sqlite_pragma(dbapi_connection, connection_record):  # noqa: ARG001
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+
+    return engine_instance
 
 
 engine = create_engine_from_url()

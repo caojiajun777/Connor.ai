@@ -7,6 +7,7 @@ pytest-cache-files-*/
 .venv/
 .env
 .env.*
+x_cookies.json
 *.db
 *.db-journal
 *.sqlite

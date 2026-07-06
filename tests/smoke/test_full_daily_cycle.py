@@ -15,7 +15,7 @@ from app.agents import AgentRunner, create_deepseek_model_factory, create_defaul
 from app.clusterer.tasks import ClusterTaskFactory
 from app.config import get_settings
 from app.db.session import SessionLocal
-from app.domain import AgentRole, RunBudgets, RunPhase
+from app.domain import AgentRole, ReportStatus, RunBudgets, RunPhase, RunStatus
 from app.evaluators.tasks import EvaluatorTaskFactory
 from app.harness import DailyRunHarness, HarnessConfig
 from app.harness.decisions import AgentTask
@@ -135,7 +135,7 @@ def test_full_daily_cycle():
         run = harness.create_run(
             report_date=date(2026, 7, 5),
             objective=objective,
-            budgets=RunBudgets(max_collect_rounds=2, max_followup_rounds=1, max_writing_rounds=2),
+            budgets=RunBudgets(max_collect_rounds=2, max_followup_rounds=1, max_writing_rounds=3),
         )
         print(f"\nRun created: {run.id}")
 
@@ -161,6 +161,10 @@ def test_full_daily_cycle():
         for decision in result.writing_decisions:
             print(f"  Writing: {decision.outcome.value} - {decision.reasoning_summary[:120]}")
 
+        assert final.phase == RunPhase.FINALIZED
+        assert final.status == RunStatus.COMPLETED
+        assert final.report_id
+
         if final.report_id:
             report = DailyReportRepository(session).require(final.report_id)
             print("\n=== REPORT ===")
@@ -171,8 +175,18 @@ def test_full_daily_cycle():
                 print(f"Markdown length: {len(report.full_markdown)} chars")
                 print("\n--- MARKDOWN (first 500 chars) ---")
                 print(report.full_markdown[:500])
+            assert report.status == ReportStatus.FINAL
             assert len(report.sections) > 0, "Report should have at least one section"
             assert report.full_markdown, "Report should have markdown"
+            assert report.evidence_map, "Report should have evidence map"
+            assert report.full_json.get("tomorrow_focus"), "Report should have tomorrow focus"
+            item_cluster_ids = {
+                cluster_id
+                for section in report.sections
+                for item in section.items
+                for cluster_id in item.cluster_ids
+            }
+            assert set(final.selected_cluster_ids).issubset(item_cluster_ids)
         else:
             pytest.fail("No final report was produced")
     finally:

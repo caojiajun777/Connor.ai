@@ -37,9 +37,10 @@ class ScoutTaskFactory:
                     "Use uncertainty and followup_questions."
                 ),
                 "tool_use_policy": (
-                    "Use the smallest number of relevant source tools needed for "
-                    "this Scout profile, usually one. After a tool returns evidence_ids, "
-                    "stop calling tools and produce the final structured JSON. "
+                    "Use at most one source-tool round unless the first tool fails. "
+                    "Choose the single most relevant source tool for this Scout profile. "
+                    "After a tool returns evidence_ids, stop calling tools and produce "
+                    "the final structured JSON immediately. "
                     "Never call mock_search in a production-style run unless the task "
                     "explicitly asks for deterministic mock evidence."
                 ),

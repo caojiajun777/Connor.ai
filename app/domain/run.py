@@ -64,5 +64,9 @@ class RunState(DomainModel):
             raise ValueError("followup_rounds exceeds max_followup_rounds")
         if self.loop_counters.writing_rounds > self.budgets.max_writing_rounds:
             raise ValueError("writing_rounds exceeds max_writing_rounds")
+        if self.loop_counters.tool_calls > self.budgets.max_tool_calls:
+            raise ValueError("tool_calls exceeds max_tool_calls")
+        if self.loop_counters.model_calls > self.budgets.max_model_calls:
+            raise ValueError("model_calls exceeds max_model_calls")
         return self
 

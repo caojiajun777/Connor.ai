@@ -40,12 +40,17 @@ def create_deepseek_model_factory() -> Callable[[AgentRoleConfig], ChatModelBase
         params: dict = {}
         if temperature is not None:
             params["temperature"] = temperature
+        client_kwargs = {}
+        if config.execution.timeout_seconds is not None:
+            client_kwargs["timeout"] = float(config.execution.timeout_seconds)
         return DeepSeekChatModel(
             credential=credential,
             model=model_name,
             parameters=DeepSeekChatModel.Parameters(**params) if params else None,
+            stream=False,
             max_retries=2,
             retry_delay=2.0,
+            client_kwargs=client_kwargs,
         )
 
     return factory

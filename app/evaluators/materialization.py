@@ -19,6 +19,7 @@ from app.domain import (
     RunState,
     TraceEventType,
     TraceStatus,
+    WritePolicy,
 )
 from app.domain.base import utc_now
 from app.evaluators.profiles import (
@@ -90,6 +91,29 @@ class EvaluatorOutputMaterializer:
         materialized = EvaluationMaterializationResult()
         for draft in result.structured_output.evaluation_drafts:
             cluster = self._cluster_for_run(run.id, draft.cluster_id)
+            if cluster is None:
+                self.context.trace_service.record_event(
+                    run_id=run.id,
+                    phase=phase,
+                    agent_role=agent_role,
+                    event_type=TraceEventType.AGENT_DECISION,
+                    status=TraceStatus.SKIPPED,
+                    summary=(
+                        f"{agent_role.value} skipped evaluation draft for missing "
+                        f"cluster {draft.cluster_id}."
+                    ),
+                    reasoning_summary=(
+                        "Evaluator draft referenced a cluster ID that is not present "
+                        "in this run; materialization skipped it instead of failing the run."
+                    ),
+                    input_payload=draft.model_dump(mode="json"),
+                    metadata={
+                        "cluster_id": draft.cluster_id,
+                        "materialized_by": "EvaluatorOutputMaterializer",
+                        "skip_reason": "missing_or_wrong_run_cluster",
+                    },
+                )
+                continue
             if cluster.category not in profile.allowed_categories:
                 self.context.trace_service.record_event(
                     run_id=run.id,
@@ -119,6 +143,7 @@ class EvaluatorOutputMaterializer:
                 continue
             draft = self._normalize_score_scale(draft)
             draft = self._normalize_decision_for_score(draft)
+            write_policy = self._calibrate_write_policy(draft)
             try:
                 profile.validate_draft(draft, cluster)
                 evaluation = self._create_evaluation(
@@ -126,6 +151,7 @@ class EvaluatorOutputMaterializer:
                     cluster=cluster,
                     draft=draft,
                     agent_role=agent_role,
+                    write_policy=write_policy,
                 )
             except ValueError as exc:
                 raise HarnessError(str(exc)) from exc
@@ -226,13 +252,58 @@ class EvaluatorOutputMaterializer:
             )
         return draft
 
-    def _cluster_for_run(self, run_id: str, cluster_id: str) -> EventCluster:
-        try:
-            cluster = self.clusters.require(cluster_id)
-        except LookupError as exc:
-            raise HarnessError(str(exc)) from exc
+    @staticmethod
+    def _calibrate_write_policy(draft: EvaluationDraft) -> WritePolicy:
+        """Derive a calibrated write policy from the evaluator's decision and scores.
+
+        This runs after _normalize_score_scale and _normalize_decision_for_score,
+        so the draft's decision and total_score already reflect any corrections.
+        """
+        decision = draft.decision
+
+        if decision in {
+            EvaluationDecision.SELECT_CONFIRMED,
+            EvaluationDecision.SELECT_EARLY_SIGNAL,
+        }:
+            return WritePolicy.WRITE_NOW
+
+        if decision == EvaluationDecision.FOLLOWUP_NOW:
+            return WritePolicy.WRITE_WITH_CAVEAT
+
+        if decision == EvaluationDecision.FOLLOWUP_LATER:
+            if draft.total_score >= 7:
+                return WritePolicy.WRITE_WITH_CAVEAT
+            return WritePolicy.CONTEXT_ONLY
+
+        if decision == EvaluationDecision.SHORT_WATCH:
+            return WritePolicy.CONTEXT_ONLY
+
+        if decision == EvaluationDecision.ARCHIVE:
+            return WritePolicy.ARCHIVE
+
+        if decision == EvaluationDecision.REJECT:
+            # Strong evidence but rejected: archive rather than discard
+            dim_scores = draft.dimension_scores
+            avg_score = (
+                sum(dim_scores.values()) / len(dim_scores)
+                if dim_scores
+                else 0
+            )
+            if avg_score >= 5:
+                return WritePolicy.ARCHIVE
+            return WritePolicy.DO_NOT_WRITE
+
+        if decision == EvaluationDecision.RECLUSTER:
+            return WritePolicy.CONTEXT_ONLY
+
+        return WritePolicy.CONTEXT_ONLY
+
+    def _cluster_for_run(self, run_id: str, cluster_id: str) -> EventCluster | None:
+        cluster = self.clusters.get(cluster_id)
+        if cluster is None:
+            return None
         if cluster.run_id != run_id:
-            raise HarnessError(f"cluster {cluster_id} does not belong to run {run_id}")
+            return None
         return cluster
 
     @staticmethod
@@ -242,7 +313,12 @@ class EvaluatorOutputMaterializer:
         cluster: EventCluster,
         draft: EvaluationDraft,
         agent_role: AgentRole,
+        write_policy: WritePolicy | None = None,
     ) -> EvaluationResult:
+        metadata = dict(draft.metadata)
+        if write_policy is not None:
+            metadata["write_policy_calibrated"] = True
+            metadata["write_policy_source"] = "EvaluatorOutputMaterializer._calibrate_write_policy"
         return EvaluationResult(
             id=deterministic_id(
                 IdPrefix.EVALUATION,
@@ -265,8 +341,10 @@ class EvaluatorOutputMaterializer:
             risk_flags=draft.risk_flags,
             required_followups=draft.required_followups,
             missing_evidence=draft.missing_evidence,
+            write_policy=write_policy,
             metadata={
                 **draft.metadata,
+                **metadata,
                 "materialized_by": "EvaluatorOutputMaterializer",
                 "cluster_category": cluster.category.value,
             },

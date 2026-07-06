@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+from time import perf_counter
 from collections.abc import Mapping
 
-from app.agents import AgentRunRequest
+from app.agents import AgentRunRequest, AgentScopeExecutionError
 from app.clusterer.materialization import ClusterOutputMaterializer
 from app.clusterer.tasks import ClusterTaskFactory
 from app.domain import RunPhase, RunState, RunStatus, TraceEventType, TraceStatus
@@ -27,6 +29,8 @@ COLLECT_TASK_LIMITS = {
     RunPhase.EVALUATING: "max_evaluator_tasks_per_round",
     RunPhase.WATCHLIST_UPDATE: "max_watchlist_tasks_per_round",
 }
+
+logger = logging.getLogger(__name__)
 
 
 class CollectLoopHarness:
@@ -182,18 +186,51 @@ class CollectLoopHarness:
             self.watchlist_lifecycle.expire_due_items(run=run, phase=phase)
 
         tool_call_count = 0
-        for task in tasks:
+        for task_index, task in enumerate(tasks, start=1):
             if task.phase != phase:
                 raise HarnessError(f"task phase {task.phase.value} does not match {phase.value}")
-            result = self.context.agent_runner.run(
-                AgentRunRequest(
+            started_at = perf_counter()
+            task_trace = self._record_task_progress(
+                run=run,
+                phase=phase,
+                task=task,
+                task_index=task_index,
+                task_count=len(tasks),
+                status=TraceStatus.STARTED,
+                summary=f"Harness dispatching {task.agent_role.value} task.",
+            )
+            try:
+                result = self.context.agent_runner.run(
+                    AgentRunRequest(
+                        run_id=run.id,
+                        phase=phase,
+                        agent_role=task.agent_role,
+                        task=task.task,
+                        context=self._build_task_context(run, phase, task.context),
+                    )
+                )
+            except AgentScopeExecutionError as exc:
+                if phase != RunPhase.SCOUTING or not self.context.config.continue_on_scout_agent_error:
+                    raise
+                duration_ms = int((perf_counter() - started_at) * 1000)
+                self.context.trace_service.record_event(
                     run_id=run.id,
                     phase=phase,
                     agent_role=task.agent_role,
-                    task=task.task,
-                    context=self._build_task_context(run, phase, task.context),
+                    event_type=TraceEventType.AGENT_DECISION,
+                    status=TraceStatus.FAILED,
+                    summary="Scout task failed; continuing collect.",
+                    error=str(exc) or type(exc).__name__,
+                    parent_id=task_trace.id,
+                    duration_ms=duration_ms,
+                    metadata={
+                        "harness": True,
+                        "skipped_task": True,
+                        "continue_on_scout_agent_error": True,
+                        "duration_ms": duration_ms,
+                    },
                 )
-            )
+                continue
             tool_call_count += len(result.tool_results)
             if phase == RunPhase.SCOUTING and self.context.config.materialize_scout_candidates:
                 self.materializer.materialize(
@@ -229,6 +266,22 @@ class CollectLoopHarness:
                     agent_role=task.agent_role,
                     result=result,
                 )
+            duration_ms = int((perf_counter() - started_at) * 1000)
+            self._record_task_progress(
+                run=run,
+                phase=phase,
+                task=task,
+                task_index=task_index,
+                task_count=len(tasks),
+                status=TraceStatus.SUCCEEDED,
+                summary=f"Harness completed {task.agent_role.value} task.",
+                parent_id=task_trace.id,
+                duration_ms=duration_ms,
+                metadata={
+                    "tool_call_count": len(result.tool_results),
+                    "duration_ms": duration_ms,
+                },
+            )
 
         if (
             phase == RunPhase.WATCHLIST_UPDATE
@@ -250,6 +303,49 @@ class CollectLoopHarness:
             phase=phase,
             summary=f"{phase.value} phase completed.",
         )
+
+    def _record_task_progress(
+        self,
+        *,
+        run: RunState,
+        phase: RunPhase,
+        task: AgentTask,
+        task_index: int,
+        task_count: int,
+        status: TraceStatus,
+        summary: str,
+        parent_id: str | None = None,
+        duration_ms: int | None = None,
+        metadata: dict | None = None,
+    ):
+        logger.info(
+            "Connor collect progress: run=%s phase=%s role=%s task=%s/%s status=%s",
+            run.id,
+            phase.value,
+            task.agent_role.value,
+            task_index,
+            task_count,
+            status.value,
+        )
+        event = self.context.trace_service.record_event(
+            run_id=run.id,
+            phase=phase,
+            agent_role=task.agent_role,
+            event_type=TraceEventType.AGENT_DECISION,
+            status=status,
+            summary=summary,
+            parent_id=parent_id,
+            duration_ms=duration_ms,
+            metadata={
+                "harness": True,
+                "task_progress": True,
+                "task_index": task_index,
+                "task_count": task_count,
+                **(metadata or {}),
+            },
+        )
+        self.context.session.flush()
+        return event
 
     def _should_bootstrap_single_agent(
         self,
@@ -327,6 +423,7 @@ class CollectLoopHarness:
         metadata = {**latest_run.metadata, "last_collect_gate": decision.model_dump(mode="json")}
 
         if decision.outcome == CollectGateOutcome.ENTER_WRITING:
+            self._mark_selected_clusters(decision.selected_cluster_ids)
             next_run = latest_run.model_copy(
                 update={
                     "phase": RunPhase.WRITING,
@@ -408,6 +505,16 @@ class CollectLoopHarness:
             phase=RunPhase.EVALUATION_GATE,
             error_summary=decision.reasoning_summary,
         )
+
+    def _mark_selected_clusters(self, cluster_ids: list[str]) -> None:
+        for cluster_id in cluster_ids:
+            cluster = self.context.runs.clusters.get(cluster_id)
+            if cluster is None:
+                continue
+            if not cluster.selected:
+                self.context.runs.clusters.add(
+                    cluster.model_copy(update={"selected": True, "updated_at": utc_now()})
+                )
 
     def _force_exhausted_decision(self, decision: CollectGateDecision) -> CollectGateDecision:
         if decision.outcome in {

@@ -443,9 +443,10 @@ def test_sec_company_facts_normalizes_xbrl_facts() -> None:
     assert envelope.tool_name == "sec_company_facts"
     assert envelope.source_type == SourceType.SEC_FILING
     assert envelope.items[0].title == "NVDA Revenues 2026 Q1"
-    assert "44062000000 USD" in envelope.items[0].snippet
+    assert "$44.06B" in envelope.items[0].snippet  # Phase 15B: formatted financial value
     assert envelope.items[0].metadata["concept"] == "Revenues"
     assert envelope.items[0].metadata["value"] == 44062000000
+    assert envelope.items[0].metadata.get("formatted_value") == "$44.06B"
     assert envelope.items[0].url == "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000123"
 
 

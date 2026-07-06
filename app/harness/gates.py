@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from app.domain import DailyReport, EvaluationResult, ReviewResult, RunState
+from app.domain import DailyReport, EvaluationResult, EventCluster, ReviewResult, RunState
 from app.domain.enums import (
+    CandidateCategory,
     EvaluationDecision,
     ReportStatus,
     ReviewDecision,
@@ -28,6 +29,35 @@ FOLLOWUP_DECISIONS = {
     EvaluationDecision.FOLLOWUP_LATER,
 }
 
+WRITEABLE_DECISIONS = {
+    EvaluationDecision.SELECT_CONFIRMED,
+    EvaluationDecision.SELECT_EARLY_SIGNAL,
+    EvaluationDecision.SHORT_WATCH,
+    EvaluationDecision.FOLLOWUP_NOW,
+    EvaluationDecision.FOLLOWUP_LATER,
+}
+
+REPORT_BUCKETS = {
+    "early_signals": {
+        CandidateCategory.EARLY_SIGNAL,
+        CandidateCategory.RESEARCH,
+        CandidateCategory.CODE_MODEL,
+    },
+    "confirmed_events": {
+        CandidateCategory.CONFIRMED_EVENT,
+        CandidateCategory.OFFICIAL_UPDATE,
+    },
+    "tech_finance": {
+        CandidateCategory.TECH_FINANCE,
+    },
+}
+
+REQUIRED_REPORT_BUCKET_ORDER = [
+    "early_signals",
+    "confirmed_events",
+    "tech_finance",
+]
+
 
 class QualityGateService:
     """Apply deterministic harness-level quality gates."""
@@ -45,6 +75,10 @@ class QualityGateService:
             if evaluation.decision in SELECT_DECISIONS
         ]
         selected_cluster_ids = self._selected_cluster_ids(run, selected_evaluations)
+        selected_cluster_ids, coverage_metadata = self._add_report_bucket_coverage(
+            full_state,
+            selected_cluster_ids,
+        )
         followup_queries = self._followup_queries(full_state.evaluations)
         recluster_ids = [
             evaluation.cluster_id
@@ -63,6 +97,7 @@ class QualityGateService:
             "followup_query_count": len(followup_queries),
             "collect_rounds": run.loop_counters.collect_rounds,
             "followup_rounds": run.loop_counters.followup_rounds,
+            **coverage_metadata["bucket_counts"],
         }
 
         if len(selected_cluster_ids) >= self.config.min_selected_items:
@@ -74,6 +109,7 @@ class QualityGateService:
                 selected_cluster_ids=selected_cluster_ids,
                 followup_queries=followup_queries,
                 metrics=metrics,
+                metadata=coverage_metadata,
             )
 
         if recluster_ids and run.loop_counters.collect_rounds < run.budgets.max_collect_rounds:
@@ -156,7 +192,7 @@ class QualityGateService:
             )
 
         if review.decision == ReviewDecision.PASS:
-            missing = self._final_report_missing_requirements(report)
+            missing = self._final_report_missing_requirements(report, full_state)
             if missing:
                 return self._writing_failure(
                     "Reviewer passed the report, but final report requirements are missing.",
@@ -203,6 +239,22 @@ class QualityGateService:
                     or [issue.title for issue in review.issues],
                     metrics=metrics,
                 )
+            missing = self._final_report_missing_requirements(report, full_state)
+            if not missing and not self._has_blocking_review_issue(review):
+                return WritingGateDecision(
+                    outcome=WritingGateOutcome.FINALIZE,
+                    reasoning_summary=(
+                        "Revision budget is exhausted, but deterministic final "
+                        "requirements pass and remaining review findings are non-blocking."
+                    ),
+                    report_id=report.id,
+                    review_result_id=review.id,
+                    risk_flags=["finalized_with_non_blocking_review_findings"],
+                    metrics={
+                        **metrics,
+                        "deterministic_finalize_after_revision_budget": True,
+                    },
+                )
             return self._writing_failure(
                 "Writing revision budget exhausted before reviewer pass.",
                 ["writing_revision_budget_exhausted"],
@@ -219,8 +271,8 @@ class QualityGateService:
             review_result_id=review.id,
         )
 
-    @staticmethod
     def _selected_cluster_ids(
+        self,
         run: RunState,
         selected_evaluations: list[EvaluationResult],
     ) -> list[str]:
@@ -229,6 +281,91 @@ class QualityGateService:
             if evaluation.cluster_id not in selected:
                 selected.append(evaluation.cluster_id)
         return selected
+
+    def _add_report_bucket_coverage(
+        self,
+        full_state: FullRunState,
+        selected_cluster_ids: list[str],
+    ) -> tuple[list[str], dict]:
+        selected = list(selected_cluster_ids)
+        selected_set = set(selected)
+        added: list[str] = []
+        available_by_bucket = self._available_writeable_clusters_by_bucket(full_state)
+
+        for bucket in REQUIRED_REPORT_BUCKET_ORDER:
+            available = available_by_bucket.get(bucket, [])
+            if not available:
+                continue
+            if any(cluster.id in selected_set for cluster in available):
+                continue
+            cluster = available[0]
+            selected.append(cluster.id)
+            selected_set.add(cluster.id)
+            added.append(cluster.id)
+
+        bucket_counts = {
+            f"selected_{bucket}_count": sum(
+                1
+                for cluster in full_state.clusters
+                if cluster.id in selected_set and self._report_bucket(cluster.category) == bucket
+            )
+            for bucket in REQUIRED_REPORT_BUCKET_ORDER
+        }
+        bucket_counts.update(
+            {
+                f"available_{bucket}_count": len(available_by_bucket.get(bucket, []))
+                for bucket in REQUIRED_REPORT_BUCKET_ORDER
+            }
+        )
+        return selected, {
+            "coverage_added_cluster_ids": added,
+            "bucket_counts": bucket_counts,
+            "required_report_buckets": REQUIRED_REPORT_BUCKET_ORDER,
+        }
+
+    def _available_writeable_clusters_by_bucket(
+        self,
+        full_state: FullRunState,
+    ) -> dict[str, list[EventCluster]]:
+        evaluations_by_cluster = self._evaluations_by_cluster(full_state.evaluations)
+        grouped: dict[str, list[tuple[float, EventCluster]]] = {
+            bucket: [] for bucket in REQUIRED_REPORT_BUCKET_ORDER
+        }
+        for cluster in full_state.clusters:
+            bucket = self._report_bucket(cluster.category)
+            if bucket is None:
+                continue
+            evaluations = evaluations_by_cluster.get(cluster.id, [])
+            writeable_evaluations = [
+                evaluation
+                for evaluation in evaluations
+                if evaluation.decision in WRITEABLE_DECISIONS
+            ]
+            if not writeable_evaluations:
+                continue
+            score = max(evaluation.total_score for evaluation in writeable_evaluations)
+            grouped[bucket].append((score, cluster))
+
+        return {
+            bucket: [
+                cluster
+                for _score, cluster in sorted(
+                    candidates,
+                    key=lambda item: (item[0], item[1].created_at),
+                    reverse=True,
+                )
+            ]
+            for bucket, candidates in grouped.items()
+        }
+
+    @staticmethod
+    def _evaluations_by_cluster(
+        evaluations: list[EvaluationResult],
+    ) -> dict[str, list[EvaluationResult]]:
+        grouped: dict[str, list[EvaluationResult]] = {}
+        for evaluation in evaluations:
+            grouped.setdefault(evaluation.cluster_id, []).append(evaluation)
+        return grouped
 
     @staticmethod
     def _followup_queries(evaluations: list[EvaluationResult]) -> list[str]:
@@ -255,8 +392,11 @@ class QualityGateService:
             return None
         return sorted(reviews, key=lambda review: review.created_at)[-1]
 
-    @staticmethod
-    def _final_report_missing_requirements(report: DailyReport) -> list[str]:
+    def _final_report_missing_requirements(
+        self,
+        report: DailyReport,
+        full_state: FullRunState,
+    ) -> list[str]:
         missing: list[str] = []
         if not report.full_markdown:
             missing.append("missing_full_markdown")
@@ -264,9 +404,71 @@ class QualityGateService:
             missing.append("missing_sections")
         if not report.evidence_map:
             missing.append("missing_evidence_map")
+        if not report.full_json.get("tomorrow_focus"):
+            missing.append("missing_tomorrow_focus")
         if report.status == ReportStatus.FAILED:
             missing.append("report_status_failed")
+        if self.config.require_report_bucket_coverage:
+            missing.extend(self._missing_selected_cluster_coverage(report, full_state))
         return missing
+
+    @staticmethod
+    def _has_blocking_review_issue(review: ReviewResult) -> bool:
+        return any(issue.priority <= 1 for issue in review.issues)
+
+    def _missing_selected_cluster_coverage(
+        self,
+        report: DailyReport,
+        full_state: FullRunState,
+    ) -> list[str]:
+        selected_ids = set(full_state.run.selected_cluster_ids)
+        if not selected_ids:
+            return []
+
+        clusters_by_id = {
+            cluster.id: cluster
+            for cluster in full_state.clusters
+            if cluster.id in selected_ids
+        }
+        item_cluster_ids = set()
+        for section in report.sections:
+            for item in section.items:
+                item_bucket = self._report_bucket(item.category)
+                for cluster_id in item.cluster_ids:
+                    cluster = clusters_by_id.get(cluster_id)
+                    if cluster is None:
+                        continue
+                    if item_bucket is not None and item_bucket == self._report_bucket(cluster.category):
+                        item_cluster_ids.add(cluster_id)
+        missing = [
+            f"missing_selected_cluster:{cluster_id}"
+            for cluster_id in sorted(selected_ids - item_cluster_ids)
+        ]
+
+        buckets_required = {
+            self._report_bucket(cluster.category)
+            for cluster in full_state.clusters
+            if cluster.id in selected_ids
+        }
+        item_categories = {
+            item.category
+            for section in report.sections
+            for item in section.items
+        }
+        for bucket in REQUIRED_REPORT_BUCKET_ORDER:
+            if bucket not in buckets_required:
+                continue
+            categories = REPORT_BUCKETS[bucket]
+            if not item_categories.intersection(categories):
+                missing.append(f"missing_report_bucket:{bucket}")
+        return missing
+
+    @staticmethod
+    def _report_bucket(category: CandidateCategory) -> str | None:
+        for bucket, categories in REPORT_BUCKETS.items():
+            if category in categories:
+                return bucket
+        return None
 
     def _writing_failure(
         self,

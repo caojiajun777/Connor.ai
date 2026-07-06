@@ -14,6 +14,7 @@ class HarnessConfig(ConnorBaseModel):
     max_watchlist_tasks_per_round: int = Field(default=1, gt=0)
     max_writing_revisions: int = Field(default=2, ge=0)
     min_selected_items: int = Field(default=1, gt=0)
+    require_report_bucket_coverage: bool = True
     manual_review_on_failure: bool = True
     archive_gate_snapshots: bool = True
     archive_loop_snapshots: bool = True
@@ -26,3 +27,4 @@ class HarnessConfig(ConnorBaseModel):
     auto_materialize_watchlist_from_evaluations: bool = True
     bootstrap_single_agent_clusters: bool = True
     bootstrap_single_agent_evaluations: bool = True
+    continue_on_scout_agent_error: bool = True

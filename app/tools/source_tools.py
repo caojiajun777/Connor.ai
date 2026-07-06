@@ -12,6 +12,8 @@ from html.parser import HTMLParser
 from typing import Any
 from xml.etree import ElementTree
 
+from pathlib import Path
+
 from app.config import get_settings
 from app.domain import SourceType, ToolEnvelope, ToolEnvelopeItem, ToolError
 from app.domain.base import utc_now
@@ -137,6 +139,57 @@ INVESTOR_RELATIONS_SOURCES = {
         format="html_page",
         homepage="https://investor.tsmc.com/english",
         html_item_kind="investor_relations_page_section",
+    ),
+}
+
+REDDIT_SOURCES = {
+    "ml": OfficialSource(
+        key="ml",
+        name="r/MachineLearning",
+        url="https://www.reddit.com/r/MachineLearning/new/.rss?limit=25",
+        format="feed",
+        homepage="https://www.reddit.com/r/MachineLearning/",
+        feed_item_kind="reddit_post",
+    ),
+    "localllama": OfficialSource(
+        key="localllama",
+        name="r/LocalLLaMA",
+        url="https://www.reddit.com/r/LocalLLaMA/new/.rss?limit=25",
+        format="feed",
+        homepage="https://www.reddit.com/r/LocalLLaMA/",
+        feed_item_kind="reddit_post",
+    ),
+    "openai": OfficialSource(
+        key="openai",
+        name="r/OpenAI",
+        url="https://www.reddit.com/r/OpenAI/new/.rss?limit=25",
+        format="feed",
+        homepage="https://www.reddit.com/r/OpenAI/",
+        feed_item_kind="reddit_post",
+    ),
+    "singularity": OfficialSource(
+        key="singularity",
+        name="r/singularity",
+        url="https://www.reddit.com/r/singularity/new/.rss?limit=25",
+        format="feed",
+        homepage="https://www.reddit.com/r/singularity/",
+        feed_item_kind="reddit_post",
+    ),
+    "nvidia": OfficialSource(
+        key="nvidia",
+        name="r/NVIDIA",
+        url="https://www.reddit.com/r/NVIDIA/new/.rss?limit=25",
+        format="feed",
+        homepage="https://www.reddit.com/r/NVIDIA/",
+        feed_item_kind="reddit_post",
+    ),
+    "amd": OfficialSource(
+        key="amd",
+        name="r/AMD",
+        url="https://www.reddit.com/r/AMD/new/.rss?limit=25",
+        format="feed",
+        homepage="https://www.reddit.com/r/AMD/",
+        feed_item_kind="reddit_post",
     ),
 }
 
@@ -316,6 +369,27 @@ def official_feed_search_tool(
         source_type=SourceType.OFFICIAL_BLOG,
         catalog=OFFICIAL_BLOG_FEEDS,
         default_source_keys=tuple(OFFICIAL_BLOG_FEEDS),
+    )
+
+
+def reddit_rss_search_tool(
+    context: ToolExecutionContext,
+    *,
+    client: JsonHttpClient | None = None,
+) -> ToolEnvelope:
+    """Search curated AI/tech subreddits via their public RSS feeds.
+
+    No authentication required — Reddit provides RSS feeds for all public
+    subreddits.  This tool fetches and normalises recent posts from a
+    curated set of AI and semiconductor subreddits.
+    """
+    return _official_catalog_search_tool(
+        context,
+        client=client,
+        tool_name="reddit_rss_search",
+        source_type=SourceType.REDDIT,
+        catalog=REDDIT_SOURCES,
+        default_source_keys=tuple(REDDIT_SOURCES),
     )
 
 
@@ -506,16 +580,88 @@ def sec_company_facts_tool(
     forms = {form.upper() for form in _string_list(context.params.get("forms"), default=("10-K", "10-Q", "20-F", "40-F"))}
     unit_filter = str(context.params.get("unit", "USD"))
     max_results = _bounded_int(context.params.get("max_results"), default=10, minimum=1, maximum=50)
+    with_context = str(context.params.get("with_context", "true")).lower() != "false"
     fact_rows = _sec_fact_rows(payload, concepts=concepts, forms=forms, unit_filter=unit_filter)
-    items = [
-        _sec_fact_item(
+
+    # Build YoY lookup when context enrichment is enabled
+    yoy_lookup: dict[tuple, dict[str, Any]] = {}
+    if with_context and len(fact_rows) > 1:
+        for row in fact_rows:
+            concept = row.get("concept")
+            fy_val = row.get("fy")
+            if concept and fy_val is not None:
+                yoy_lookup.setdefault((concept, fy_val + 1), row)
+
+    items: list[ToolEnvelopeItem] = []
+    for row in fact_rows[:max_results]:
+        item = _sec_fact_item(
             row,
             cik=cik,
             company_name=str(payload.get("entityName") or company.get("title") or ""),
             ticker=company.get("ticker"),
         )
-        for row in fact_rows[:max_results]
-    ]
+        if with_context:
+            formatted_val = _format_financial_value(row.get("val"), row.get("unit"))
+            concept = row.get("concept")
+            fy_val = row.get("fy")
+            prior_row = yoy_lookup.get((concept, fy_val)) if concept and fy_val is not None else None
+            if prior_row is not None:
+                prior_val = prior_row.get("val")
+                try:
+                    curr = float(row["val"])
+                    prev = float(prior_val) if prior_val is not None else None
+                except (TypeError, ValueError):
+                    curr = None
+                    prev = None
+                if curr is not None and prev is not None and prev != 0:
+                    yoy_pct = round((curr - prev) / abs(prev) * 100, 1)
+                    yoy_dir = "+" if yoy_pct >= 0 else ""
+                    prior_meta = {
+                        "prior_fy": prior_row.get("fy"),
+                        "prior_fp": prior_row.get("fp"),
+                        "prior_value": prior_val,
+                        "yoy_change_pct": yoy_pct,
+                        "yoy_change_abs": curr - prev,
+                        "formatted_value": formatted_val,
+                        "formatted_prior_value": _format_financial_value(prior_val, row.get("unit")),
+                    }
+                    item = item.model_copy(
+                        update={
+                            "snippet": (
+                                f"SEC XBRL fact {item.title}: {formatted_val}"
+                                f" ({row.get('form')}, FY{fy_val} {row.get('fp') or ''}),"
+                                f" {yoy_dir}{yoy_pct}% YoY;"
+                                f" period ended {row.get('end') or 'n/a'}."
+                            ),
+                            "metadata": {**item.metadata, **prior_meta},
+                        }
+                    )
+                else:
+                    item = item.model_copy(
+                        update={
+                            "snippet": (
+                                f"SEC XBRL fact {item.title}: {formatted_val}"
+                                f" ({row.get('form')}, FY{fy_val} {row.get('fp') or ''});"
+                                f" period ended {row.get('end') or 'n/a'}."
+                            ),
+                            "metadata": {
+                                **item.metadata,
+                                "formatted_value": formatted_val,
+                            },
+                        }
+                    )
+            else:
+                item = item.model_copy(
+                    update={
+                        "snippet": (
+                            f"SEC XBRL fact {item.title}: {formatted_val}"
+                            f" ({row.get('form')}, FY{fy_val} {row.get('fp') or ''});"
+                            f" period ended {row.get('end') or 'n/a'}."
+                        ),
+                        "metadata": {**item.metadata, "formatted_value": formatted_val},
+                    }
+                )
+        items.append(item)
     return ToolEnvelope(
         tool_name="sec_company_facts",
         source_type=SourceType.SEC_FILING,
@@ -1507,6 +1653,28 @@ def _sec_fact_rows(
     )
 
 
+def _format_financial_value(value: Any, unit: str | None = "USD") -> str:
+    """Format an XBRL numeric value into a human-readable financial string."""
+    if value is None:
+        return "n/a"
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    abs_num = abs(num)
+    sign = "-" if num < 0 else ""
+    if abs_num >= 1e12:
+        return f"{sign}${abs_num / 1e12:.2f}T"
+    if abs_num >= 1e9:
+        return f"{sign}${abs_num / 1e9:.2f}B"
+    if abs_num >= 1e6:
+        return f"{sign}${abs_num / 1e6:.2f}M"
+    if abs_num >= 1e3:
+        return f"{sign}${abs_num / 1e3:.2f}K"
+    unit_label = f" {unit}" if unit else ""
+    return f"{sign}{num:,.2f}{unit_label}"
+
+
 def _sec_fact_item(
     row: dict[str, Any],
     *,
@@ -2253,3 +2421,427 @@ def _unexpected_payload_envelope(response: ToolEnvelope, *, expected_shape: str)
             },
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# SEC filing content extraction (Phase 15B)
+# ---------------------------------------------------------------------------
+
+
+def _sec_extract_html_text(html: str) -> str:
+    """Extract plain text from SEC filing HTML, preserving section structure."""
+    import re as _re
+    # Remove script and style content
+    cleaned = _re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", html, flags=_re.DOTALL | _re.IGNORECASE)
+    # Replace common block-level tags with newlines
+    cleaned = _re.sub(r"<\s*(br|p|div|li|tr|h[1-6])\s*/?>", "\n", cleaned, flags=_re.IGNORECASE)
+    cleaned = _re.sub(r"</(div|p|table|tr|section|article)>", "\n", cleaned, flags=_re.IGNORECASE)
+    # Strip all remaining tags
+    cleaned = _re.sub(r"<[^>]+>", " ", cleaned)
+    # Collapse whitespace
+    cleaned = _re.sub(r"&nbsp;", " ", cleaned)
+    cleaned = _re.sub(r"\s+", " ", cleaned)
+    cleaned = _re.sub(r"\n\s*\n", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def _sec_extract_key_sections(html: str) -> dict[str, str]:
+    """Identify key SEC filing sections by heading patterns and extract their text."""
+    import re as _re
+    section_patterns = [
+        ("business", r"item\s+1[\.\s]*\s*business", re.IGNORECASE),
+        ("risk_factors", r"item\s+1a[\.\s]*\s*risk\s*factors", re.IGNORECASE),
+        ("mda", r"item\s+7[\.\s]*\s*management.*discussion", re.IGNORECASE),
+    ]
+    # Normalize for heading detection: collapse whitespace, strip tags minimally
+    text = _re.sub(r"<[^>]+>", " ", html)
+    text = _re.sub(r"&nbsp;", " ", text)
+    text = _re.sub(r"\s+", " ", text)
+    sections: dict[str, str] = {}
+    matches: list[tuple[str, int]] = []
+    for section_key, pattern, flags in section_patterns:
+        for match in _re.finditer(pattern, text):
+            matches.append((section_key, match.start()))
+    matches.sort(key=lambda x: x[1])
+    if not matches:
+        return {"full_text": _sec_extract_html_text(html)[:5000]}
+    for i, (key, start) in enumerate(matches):
+        end = matches[i + 1][1] if i + 1 < len(matches) else len(text)
+        section_text = text[start:end].strip()
+        cleaned = _re.sub(r"\s+", " ", section_text)
+        truncated = cleaned[:2000] if key != "mda" else cleaned[:3000]
+        sections[key] = truncated
+    sections["full_text"] = _sec_extract_html_text(html)[:5000]
+    return sections
+
+
+def sec_filing_content_tool(
+    context: ToolExecutionContext,
+    *,
+    client: JsonHttpClient | None = None,
+) -> ToolEnvelope:
+    """Fetch and extract narrative content from SEC EDGAR filing HTML documents.
+
+    Accepts ticker or CIK to resolve the company, then fetches recent filings
+    and extracts key narrative sections (Risk Factors, MD&A, Business) from the
+    primary documents.
+    """
+    settings = get_settings()
+    client = client or JsonHttpClient()
+    retrieved_at = utc_now()
+    headers = _sec_headers(settings.sec_user_agent or settings.tool_user_agent)
+    company, resolve_errors, resolve_metadata = _resolve_sec_company(
+        context, client=client, headers=headers
+    )
+    if resolve_errors:
+        return ToolEnvelope(
+            tool_name="sec_filing_content",
+            source_type=SourceType.SEC_FILING,
+            query=context.query,
+            retrieved_at=retrieved_at,
+            errors=resolve_errors,
+            metadata=resolve_metadata,
+        )
+
+    cik = company["cik"]
+    forms = _string_list(
+        context.params.get("forms"),
+        default=("10-K", "10-Q"),
+    )
+    forms_set = {form.upper() for form in forms}
+    max_filings = _bounded_int(
+        context.params.get("max_filings"), default=3, minimum=1, maximum=10
+    )
+    filing_timeout = _bounded_int(
+        context.params.get("filing_fetch_timeout_seconds"), default=60, minimum=10, maximum=120
+    )
+
+    submissions_url = SEC_SUBMISSIONS_URL_TEMPLATE.format(cik=cik)
+    sub_payload, sub_error = _sec_json_payload(
+        client,
+        submissions_url,
+        headers=headers,
+        timeout_seconds=_timeout_seconds(context),
+        error_prefix="sec_filing_content_submissions",
+    )
+    if sub_error is not None:
+        return ToolEnvelope(
+            tool_name="sec_filing_content",
+            source_type=SourceType.SEC_FILING,
+            query=context.query,
+            retrieved_at=retrieved_at,
+            errors=[sub_error],
+            metadata={**resolve_metadata, "endpoint": submissions_url, "company": company},
+        )
+
+    if not isinstance(sub_payload, dict):
+        return ToolEnvelope(
+            tool_name="sec_filing_content",
+            source_type=SourceType.SEC_FILING,
+            query=context.query,
+            retrieved_at=retrieved_at,
+            errors=[
+                ToolError(
+                    code="sec_filing_content_unexpected_payload",
+                    message="Expected SEC submissions payload object",
+                    retryable=False,
+                )
+            ],
+            metadata={
+                **resolve_metadata,
+                "endpoint": submissions_url,
+                "payload_type": type(sub_payload).__name__,
+            },
+        )
+
+    filings_data = sub_payload.get("filings", {}).get("recent", {})
+    if not filings_data:
+        return ToolEnvelope(
+            tool_name="sec_filing_content",
+            source_type=SourceType.SEC_FILING,
+            query=context.query,
+            retrieved_at=retrieved_at,
+            items=[],
+            metadata={
+                **resolve_metadata,
+                "endpoint": submissions_url,
+                "company": company,
+                "result_count": 0,
+            },
+        )
+
+    keys = list(filings_data.keys())
+    rows: list[dict[str, Any]] = []
+    if "accessionNumber" in keys:
+        for i in range(len(filings_data.get("accessionNumber", []))):
+            row = {key: filings_data[key][i] if i < len(filings_data.get(key, [])) else None for key in keys}
+            rows.append(row)
+
+    items: list[ToolEnvelopeItem] = []
+    for row in rows:
+        form = str(row.get("form") or "").upper()
+        if forms_set and form not in forms_set:
+            continue
+        if len(items) >= max_filings:
+            break
+
+        primary_doc = row.get("primaryDocument")
+        filing_url = _sec_filing_url(cik, row.get("accessionNumber"), primary_doc)
+        if not filing_url or not primary_doc:
+            continue
+
+        try:
+            html_response = client.get_text(
+                filing_url,
+                headers=headers,
+                timeout_seconds=filing_timeout,
+            )
+            html_text = html_response.text
+        except SourceHttpError as exc:
+            items.append(
+                ToolEnvelopeItem(
+                    title=f"{company.get('ticker', company.get('title', ''))} {form} {row.get('filingDate')}",
+                    url=filing_url,
+                    author="SEC EDGAR",
+                    published_at=_parse_sec_date(row.get("filingDate")),
+                    snippet=f"Failed to fetch filing content: {exc.message}",
+                    raw_ref=str(row.get("accessionNumber")),
+                    raw_hash=_stable_hash(row),
+                    metadata={
+                        "kind": "sec_filing_content_error",
+                        "cik": cik,
+                        "ticker": company.get("ticker"),
+                        "form": form,
+                        "accession_number": row.get("accessionNumber"),
+                        "filing_date": row.get("filingDate"),
+                        "error": exc.message,
+                    },
+                )
+            )
+            continue
+
+        sections = _sec_extract_key_sections(html_text)
+        section_names = sorted(sections.keys())
+        primary_snippet = sections.get("mda") or sections.get("risk_factors") or sections.get("full_text", "")[:1000]
+
+        filing_date = row.get("filingDate")
+        company_label = company.get("ticker") or company.get("title", "")
+        items.append(
+            ToolEnvelopeItem(
+                title=f"{company_label} {form} filing content ({', '.join(section_names)})",
+                url=filing_url,
+                author="SEC EDGAR",
+                published_at=_parse_sec_date(filing_date),
+                snippet=primary_snippet,
+                raw_ref=f"{row.get('accessionNumber')}:{primary_doc}",
+                raw_hash=_stable_hash({**row, "extracted_sections": sorted(sections.keys())}),
+                metadata={
+                    "kind": "sec_filing_content",
+                    "cik": cik,
+                    "ticker": company.get("ticker"),
+                    "company_name": str(sub_payload.get("name") or company.get("title", "")),
+                    "form": form,
+                    "accession_number": row.get("accessionNumber"),
+                    "filing_date": filing_date,
+                    "report_date": row.get("reportDate"),
+                    "primary_document": primary_doc,
+                    "extracted_sections": section_names,
+                    "section_text": sections,
+                },
+            )
+        )
+
+    return ToolEnvelope(
+        tool_name="sec_filing_content",
+        source_type=SourceType.SEC_FILING,
+        query=context.query,
+        retrieved_at=retrieved_at,
+        items=items,
+        metadata={
+            **resolve_metadata,
+            "endpoint": submissions_url,
+            "company": {**company, "name": sub_payload.get("name") or company.get("title")},
+            "forms": sorted(forms_set),
+            "result_count": len(items),
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# X / Twitter search via browser automation (Phase 14 completion)
+# ---------------------------------------------------------------------------
+
+
+def x_search_tool(
+    context: ToolExecutionContext,
+    *,
+    _client: JsonHttpClient | None = None,
+) -> ToolEnvelope:
+    """Search X (Twitter) for recent AI/tech posts via headless browser.
+
+    Uses Playwright with exported cookies for authentication.  Requires:
+    - ``playwright`` Python package + ``playwright install chromium``
+    - A ``x_cookies.json`` file exported from a logged-in browser session
+    """
+    settings = get_settings()
+    retrieved_at = utc_now()
+
+    cookies_path = Path(settings.x_cookies_file)
+    if not cookies_path.exists():
+        return ToolEnvelope(
+            tool_name="x_search",
+            source_type=SourceType.X,
+            query=context.query,
+            retrieved_at=retrieved_at,
+            errors=[
+                ToolError(
+                    code="x_cookies_missing",
+                    message=f"X cookies file not found: {cookies_path}",
+                    retryable=False,
+                )
+            ],
+            metadata={"cookies_path": str(cookies_path)},
+        )
+
+    try:
+        cookies = json.loads(cookies_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        return ToolEnvelope(
+            tool_name="x_search",
+            source_type=SourceType.X,
+            query=context.query,
+            retrieved_at=retrieved_at,
+            errors=[
+                ToolError(
+                    code="x_cookies_parse_error",
+                    message=f"Failed to parse X cookies file: {exc}",
+                    retryable=False,
+                )
+            ],
+        )
+
+    max_results = min(
+        _bounded_int(context.params.get("max_results"), default=10, minimum=1, maximum=50),
+        50,
+    )
+    search_query = context.query.strip() or "AI OR OpenAI OR GPT"
+    search_url = (
+        f"https://x.com/search?q={_url_quote(search_query)}&src=typed_query&f=live"
+    )
+    timeout_ms = (
+        _bounded_int(
+            context.params.get("timeout_seconds"), default=30, minimum=10, maximum=60
+        )
+        * 1000
+    )
+
+    try:
+        from playwright.sync_api import sync_playwright as _sync_playwright  # type: ignore[import-untyped]
+    except ImportError:
+        return ToolEnvelope(
+            tool_name="x_search",
+            source_type=SourceType.X,
+            query=context.query,
+            retrieved_at=retrieved_at,
+            errors=[
+                ToolError(
+                    code="x_playwright_missing",
+                    message=(
+                        "Playwright is not installed. "
+                        "Run: pip install playwright && playwright install chromium"
+                    ),
+                    retryable=False,
+                )
+            ],
+        )
+
+    items: list[ToolEnvelopeItem] = []
+    errors: list[ToolError] = []
+    try:
+        with _sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            browser_ctx = browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1920, "height": 1080},
+            )
+            browser_ctx.add_cookies(cookies)
+            page = browser_ctx.new_page()
+            page.goto(search_url, wait_until="domcontentloaded", timeout=timeout_ms)
+            page.wait_for_timeout(3000)
+            articles = page.query_selector_all("article")
+            count = 0
+            for article in articles:
+                if count >= max_results:
+                    break
+                try:
+                    text = article.inner_text()
+                except Exception:
+                    continue
+                if not text.strip():
+                    continue
+                lines = [line.strip() for line in text.split("\n") if line.strip()]
+                # X article structure: line 0 = display name + handle + timestamp,
+                # then reply-to indicator, then the actual tweet text follows
+                author = lines[0] if lines else "X user"
+                # Skip past metadata lines (handle, timestamp, reply indicator)
+                body_start = 1
+                for i, line in enumerate(lines[1:], start=1):
+                    if line.startswith("@") or line.endswith("·") or line.endswith("m") or line.endswith("h") or line.endswith("d"):
+                        continue
+                    if line in ("·", "Replying to", ""):
+                        continue
+                    body_start = i
+                    break
+                tweet_body = " ".join(lines[body_start:])[:200] if body_start < len(lines) else text[:200]
+                snippet = tweet_body if tweet_body else text[:500]
+                item = ToolEnvelopeItem(
+                    title=tweet_body,
+                    url=search_url,
+                    author=author,
+                    published_at=retrieved_at,
+                    snippet=snippet,
+                    raw_hash=_stable_hash({"text": snippet, "author": author}),
+                    metadata={
+                        "kind": "x_post",
+                        "query": search_query,
+                        "result_index": count,
+                        "author": author,
+                        "full_text": text[:1000],
+                    },
+                )
+                items.append(item)
+                count += 1
+            browser_ctx.close()
+            browser.close()
+    except Exception as exc:
+        errors.append(
+            ToolError(
+                code="x_search_error",
+                message=f"X search failed: {exc}",
+                retryable=True,
+            )
+        )
+
+    return ToolEnvelope(
+        tool_name="x_search",
+        source_type=SourceType.X,
+        query=context.query,
+        retrieved_at=retrieved_at,
+        items=items,
+        errors=errors,
+        metadata={
+            "search_url": search_url,
+            "cookies_source": str(cookies_path),
+            "result_count": len(items),
+        },
+    )
+
+
+def _url_quote(value: str) -> str:
+    """Percent-encode a string for use in a URL query component."""
+    from urllib.parse import quote as _quote
+
+    return _quote(value, safe="")

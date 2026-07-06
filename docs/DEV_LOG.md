@@ -1345,3 +1345,274 @@ Open follow-ups:
 
 - Add Reddit/X/Twitter only after auth, rate-limit, platform-policy, and content boundaries are explicit.
 - Consider a dedicated HN item/thread lookup tool if follow-up workflows need comment-level evidence.
+
+## 2026-07-05
+
+### Phase 15A: Report Quality and Selection Hardening Started
+
+What we did:
+
+- Re-ran a real daily-cycle smoke run to inspect business output quality.
+- Confirmed that the system can collect, cluster, evaluate, write, review, and persist a report, but the generated report can still pause in review and miss major product sections.
+- Added report bucket coverage to the collect gate.
+- Added writer context quality contracts with selected cluster write policies.
+- Added finalization blockers for missing selected clusters, missing report buckets, and missing tomorrow focus.
+- Hardened the live full-cycle smoke test so paused/needs-revision reports no longer count as passing.
+- Added a dedicated Phase 15A plan and worklog.
+- Normalized Finance Scout `official_confirmation` status into `confirmed_fact` at materialization time.
+- Added formal default Agent timeouts and Scout execution-error continuation.
+- Wired Agent role timeouts into the DeepSeek HTTP client.
+- Switched Connor's DeepSeek Agent factory to non-streaming responses for structured formal runs.
+- Generalized Finance Scout status normalization for rumor-like finance candidates.
+- Added deterministic Clusterer fallback for Agent timeout failures.
+- Repaired Tech-Finance report items after cluster-based category normalization.
+- Repaired or skipped Clusterer drafts with invalid candidate lineage.
+- Recorded that strict smoke now needs runtime/observability tuning before more full-run retries.
+- Added role-specific runtime limits and harness task-progress tracing.
+
+Why:
+
+- Worker, queue, scheduler, and Dashboard work should not be built on top of a pipeline that can produce structurally incomplete daily reports.
+- Connor.ai needs deterministic product-level quality gates, not only model-level reviewer prompts.
+
+Files changed:
+
+- `app/harness/config.py`
+- `app/harness/gates.py`
+- `app/harness/collect.py`
+- `app/harness/materialization.py`
+- `app/agents/registry.py`
+- `app/agents/model_factory.py`
+- `app/config.py`
+- `app/writing/tasks.py`
+- `tests/harness/test_quality_gates.py`
+- `tests/harness/test_all_scouts_closed_loop.py`
+- `tests/harness/test_collect_loop.py`
+- `tests/agents/test_registry.py`
+- `tests/agents/test_model_factory.py`
+- `tests/writing/test_tasks.py`
+- `tests/smoke/test_full_daily_cycle.py`
+- `tests/domain/fixtures.py`
+- `docs/plans/phase-15a-report-quality-hardening.md`
+- `docs/worklogs/phase-15a-report-quality-hardening.md`
+- `docs/PROGRESS.md`
+- `docs/DEV_LOG.md`
+
+Checks:
+
+- `python -m pytest tests\harness\test_quality_gates.py tests\writing\test_tasks.py -q`: 9 passed.
+- `python -m pytest tests\harness tests\writing -q`: 35 passed.
+- `python -m pytest tests\agents\test_runner.py tests\evaluators\test_materialization.py tests\tools\test_source_tools.py -q`: 45 passed.
+- `python -m pytest -q --ignore=tests\smoke`: 146 passed.
+- `python -m pytest tests\agents\test_runner.py tests\writing tests\harness\test_quality_gates.py -q`: 28 passed.
+- `python -m pytest tests\harness\test_writing_loop.py -q`: 2 passed.
+- `python -m pytest tests\harness tests\writing tests\agents\test_runner.py -q`: 48 passed.
+- `python -m pytest tests\writing\test_materialization.py -q`: 7 passed.
+- `python -m pytest tests\harness tests\writing tests\agents\test_runner.py -q`: 49 passed.
+- `python -m pytest -q --ignore=tests\smoke`: 149 passed.
+- `python -m pytest tests\writing\test_materialization.py tests\harness\test_quality_gates.py -q`: 16 passed.
+- `python -m pytest tests\harness tests\writing tests\agents\test_runner.py -q`: 51 passed.
+- `python -m pytest -q --ignore=tests\smoke`: 151 passed.
+- `python -m pytest tests\agents\test_runner.py::test_agent_runner_uses_writer_fallback_after_failed_repair tests\agents\test_runner.py::test_agent_runner_uses_clusterer_fallback_after_failed_repair -q`: 2 passed.
+- `python -m pytest tests\harness tests\writing tests\agents\test_runner.py -q`: 52 passed.
+- `python -m pytest -q --ignore=tests\smoke`: 152 passed.
+- `python -m pytest tests\writing\test_materialization.py -q`: 9 passed.
+- `python -m pytest tests\harness tests\writing tests\agents\test_runner.py -q`: 53 passed.
+- `python -m pytest -q --ignore=tests\smoke`: 153 passed.
+- `python -m pytest tests\watchlist\test_materialization.py -q`: 5 passed.
+- `python -m pytest tests\harness tests\writing tests\agents\test_runner.py tests\watchlist -q`: 62 passed.
+- `python -m pytest -q --ignore=tests\smoke`: 154 passed.
+- `python -m pytest tests\writing\test_tasks.py -q`: 3 passed.
+- `python -m pytest -q --ignore=tests\smoke`: 154 passed.
+- `python -m pytest tests\agents\test_runner.py::test_agent_runner_normalizes_actionable_reviewer_reject_to_revise tests\agents\test_runner.py::test_agent_runner_normalizes_reviewer_pass_with_issues -q`: 2 passed.
+- `python -m pytest tests\harness tests\writing tests\agents\test_runner.py tests\watchlist -q`: 63 passed.
+- `python -m pytest -q --ignore=tests\smoke`: 155 passed.
+- `python -m ruff check app\harness\materialization.py tests\harness\test_all_scouts_closed_loop.py`: passed.
+- `python -m pytest tests\harness\test_all_scouts_closed_loop.py -q`: 9 passed.
+- `python -m pytest tests\harness tests\writing tests\agents\test_runner.py tests\watchlist -q`: 64 passed.
+- `python -m ruff check .`: passed.
+- `python -m pytest -q --ignore=tests\smoke`: 156 passed.
+- `python -m ruff check app\config.py app\agents\registry.py app\harness\config.py app\harness\collect.py tests\agents\test_registry.py tests\harness\test_collect_loop.py`: passed.
+- `python -m pytest tests\agents\test_registry.py tests\harness\test_collect_loop.py -q`: 6 passed.
+- `python -m pytest tests\agents tests\harness tests\writing tests\watchlist -q`: 68 passed.
+- `python -m ruff check .`: passed.
+- `python -m pytest -q --ignore=tests\smoke`: 158 passed.
+- `python -m ruff check app\agents\model_factory.py tests\agents\test_model_factory.py app\agents\registry.py app\harness\collect.py tests\agents\test_registry.py tests\harness\test_collect_loop.py`: passed.
+- `python -m pytest tests\agents\test_model_factory.py tests\agents\test_registry.py tests\harness\test_collect_loop.py -q`: 7 passed.
+- `python -m pytest tests\agents tests\harness tests\writing tests\watchlist -q`: 69 passed.
+- `python -m ruff check .`: passed.
+- `python -m pytest -q --ignore=tests\smoke`: 159 passed.
+- `python -m ruff check app\harness\materialization.py tests\harness\test_all_scouts_closed_loop.py`: passed.
+- `python -m pytest tests\harness\test_all_scouts_closed_loop.py -q`: 10 passed.
+- `python -m pytest tests\agents tests\harness tests\writing tests\watchlist -q`: 70 passed.
+- `python -m ruff check .`: passed.
+- `python -m pytest -q --ignore=tests\smoke`: 160 passed.
+- `python -m ruff check app\agents\runner.py tests\agents\test_runner.py`: passed.
+- `python -m pytest tests\agents\test_runner.py -q`: 15 passed.
+- `python -m pytest tests\agents tests\harness tests\writing tests\watchlist -q`: 71 passed.
+- `python -m ruff check .`: passed.
+- `python -m pytest -q --ignore=tests\smoke`: 161 passed.
+- `python -m ruff check app\writing\materialization.py tests\writing\test_materialization.py`: passed.
+- `python -m pytest tests\writing\test_materialization.py -q`: 11 passed.
+- `python -m pytest tests\agents tests\harness tests\writing tests\watchlist -q`: 73 passed.
+- `python -m ruff check .`: passed.
+- `python -m pytest -q --ignore=tests\smoke`: 163 passed.
+- `python -m ruff check app\clusterer\materialization.py tests\clusterer\test_materialization.py`: passed.
+- `python -m pytest tests\clusterer\test_materialization.py -q`: 5 passed.
+- `python -m pytest tests\agents tests\clusterer tests\harness tests\writing tests\watchlist -q`: 78 passed.
+- `python -m ruff check .`: passed.
+- `python -m pytest -q --ignore=tests\smoke`: 165 passed.
+- Strict smoke retry 17: terminated after extended runtime with no new phase output; no final pass yet.
+- `python -m ruff check app\agents\registry.py app\harness\collect.py app\harness\writing.py app\scouts\tasks.py tests\agents\test_registry.py tests\harness\test_collect_loop.py tests\harness\test_writing_loop.py`: passed.
+- `python -m pytest tests\agents\test_registry.py tests\harness\test_collect_loop.py tests\harness\test_writing_loop.py -q`: 8 passed.
+- `python -m pytest tests\agents tests\clusterer tests\harness tests\scouts tests\writing tests\watchlist -q`: 82 passed.
+- `python -m ruff check .`: passed.
+- `python -m pytest -q --ignore=tests\smoke`: 165 passed.
+- `python -m ruff check app\agents\model_factory.py tests\agents\test_model_factory.py`: passed.
+- `python -m pytest tests\agents\test_model_factory.py tests\smoke\test_deepseek_integration.py::test_deepseek_model_responds_to_prompt -q`: 2 passed.
+- `python -m pytest tests\agents tests\harness tests\writing tests\watchlist -q`: 69 passed.
+- `python -m ruff check .`: passed.
+- `python -m pytest -q --ignore=tests\smoke`: 159 passed.
+
+Effect:
+
+- The collect gate now selects writeable official and finance clusters with caveats when those report buckets would otherwise be missing.
+- Writer receives explicit required buckets and selected-cluster coverage rules.
+- A report cannot finalize if it omits selected clusters or lacks tomorrow focus.
+- The live smoke test now measures business pass/fail more honestly.
+- Reviewer context is now compact enough for formal runs and explicitly lists missing selected-cluster coverage.
+- Malformed Reviewer issue objects are normalized before schema validation instead of failing the whole run.
+- Final Reviewer now receives the revised report state after Editor materialization, rather than reviewing a stale pre-edit snapshot.
+- Mixed cluster-level Reviewer drafts now aggregate into one report-level decision, so any `revise` draft prevents false finalization.
+- Watchlist update report items can cite event clusters for lineage, but they do not count as body coverage for selected Early/Confirmed/Finance clusters.
+- Writer now has a deterministic fallback report path when both normal and repaired model JSON are malformed.
+- Watchlist update evidence is run-scoped while normal report item evidence remains cluster-scoped.
+- Invalid Watchlist Agent drafts are skipped with trace events instead of failing the run.
+- Reviewer context no longer exposes truncated markdown excerpts as if they were report artifacts.
+- The strict smoke run now uses the formal three-round writing budget used by CLI/default runs.
+- Actionable Reviewer `reject` outputs are normalized to `revise` so the Editor loop can repair the report.
+- Finance Scout can now persist official IR/SEC-style claims as `confirmed_fact` without widening the role profile.
+- Formal AgentScope roles now have bounded default timeouts, and Scout execution errors can be skipped with trace records.
+- DeepSeek model calls now receive the same timeout at the provider-client layer.
+- DeepSeek formal Agent runs now use complete non-streaming responses, which better matches structured JSON output.
+- Finance Scout now downgrades leak/community/gray/code/researcher statuses to `single_source_signal` instead of failing profile validation.
+- Clusterer timeouts can now fall back to conservative deterministic grouping while preserving timeout trace records.
+- Tech-Finance report items can inherit tickers from cited clusters or receive a cautious impact-chain fallback after category normalization.
+- Clusterer drafts with missing candidate IDs are repaired from persisted evidence/category lineage or skipped with trace.
+- The next Phase 15A priority is runtime visibility and ReAct loop reduction before further full smoke retries.
+- Scouts now have bounded two-iteration/one-tool defaults; downstream structured-output roles default to one iteration with no tools.
+- Collect and writing loops now record task progress with role, index, duration, and tool-call counts.
+- Scouts can now convert already-persisted tool evidence into a conservative structured draft when AgentScope reaches the ReAct iteration boundary.
+- Clusterer materialization now repairs missing or invalid draft evidence IDs from verified candidate lineage before creating clusters.
+- Writing materialization now narrows mixed-category report items to one verifiable cluster category instead of crashing on raw Writer output.
+- Early Signal and Research report items now receive deterministic preprint/uncertainty hedging for key data, impact, and follow-up language while preserving strict failure for explicit fact claims.
+- Review materialization now filters non-blocking findings that are already caveated or allowed by the report contract, while keeping deterministic guards for real fact-language failures.
+- Review materialization now falls back to the current run's latest report when Reviewer returns a stale or malformed report_id.
+- Review filtering now verifies evidence-map trace consistency and recognizes already-satisfied no-finance, follow-up, and preprint evidence-bundle findings.
+- Tech-Finance report items now inherit missing tickers and receive explicit impact-chain text during materialization.
+- Report item materialization now fills missing follow-up points and replaces Hugging Face emoji text with renderer-safe plain text.
+- Daily report materialization now derives top-level `tomorrow_focus` from Tomorrow Focus sections, item follow-ups, or watchlist next-watch entries when Writer omits it.
+- Writing quality gate can now finalize after revision budget exhaustion when deterministic final requirements pass and remaining Reviewer findings are non-blocking.
+- Evaluator materialization now skips and traces missing/wrong-run cluster IDs instead of failing the run.
+
+Open follow-ups:
+
+- Re-run a targeted live smoke to verify role runtime limits and Scout ReAct fallback before another strict live full-cycle smoke.
+- Inspect whether the new report finalizes and includes Early Signals, Confirmed Events, and Tech-Finance.
+- Add evidence URL deduplication and evaluator write-policy calibration next.
+
+
+### Phase 15A Complete: Formal Daily-Run Quality Hardening
+
+What we did:
+
+- Finished Phase 15A by making the formal daily run reach `finalized / completed` under the strict live smoke test.
+- Made final Markdown deterministic from structured report sections instead of trusting model-provided `full_markdown`.
+- Normalized report sections into Connor.ai's canonical order: Early Signals, Confirmed Events, Tech-Finance, then Watchlist and Tomorrow Focus.
+- Fixed duplicate Watchlist rendering when both section items and `watchlist_updates` existed.
+- Removed redundant early-signal caveat prefixes from `core_information` while keeping uncertainty labels, key-data hedging, and fact-language guards.
+- Filtered non-blocking Reviewer copy-edit findings after deterministic final requirements pass.
+
+Why:
+
+- Phase 15A's goal was not just to create a report record, but to prove the full AgentScope + harness loop can produce a final, auditable daily report.
+- The final artifact must be stable enough for later Dashboard rendering and business-quality tuning.
+
+Files changed:
+
+- `app/writing/materialization.py`
+- `tests/writing/test_materialization.py`
+- `docs/worklogs/phase-15a-report-quality-hardening.md`
+- `docs/plans/phase-15a-report-quality-hardening.md`
+- `docs/PROGRESS.md`
+- `docs/DEV_LOG.md`
+
+Checks:
+
+- `python -m ruff check app\writing\materialization.py tests\writing\test_materialization.py`: passed.
+- `python -m pytest tests\writing\test_materialization.py -q`: 20 passed.
+- `python -m ruff check .`: passed.
+- `python -m pytest -q --ignore=tests\smoke`: 177 passed.
+- `python -m pytest tests\smoke\test_full_daily_cycle.py -v -s`: 1 passed in 371.32 seconds.
+
+Effect:
+
+- The strict live full-cycle run finalized successfully with a final report.
+- The report included Early Signals, Confirmed Events, Tech-Finance, one Watchlist section, Tomorrow Focus, and an evidence map.
+- The final smoke report had 3 structured body sections, 3 evidence-map entries, 3 structured watchlist updates, and 7369 characters of Markdown.
+
+Open follow-ups:
+
+- Start Phase 15B for business quality calibration.
+- Add evidence URL/source deduplication.
+- Calibrate evaluator decisions into explicit `write_policy`.
+- Extract SEC filing content and finance figures so Tech-Finance output moves beyond filing metadata.
+- Register `pytest.mark.slow` and decide how to summarize expected bounded ReAct warnings.
+
+
+### Post-15B Technical Debt: AgentScope Tool Offload
+
+What we did:
+
+- Changed AgentScope-exposed Connor tools from sync callables to async callables.
+- Offloaded synchronous `ToolExecutor.execute()` work to a per-bridge single-thread executor.
+- Kept Connor tools marked `is_concurrency_safe=False`, preserving sequential database side effects.
+- Added thread-safe bridge APIs for executed tool result counts and snapshots.
+- Closed the bridge worker from `AgentRunner.run_async()` in a `finally` block.
+- Updated the in-memory SQLite test fixture to use `StaticPool` and `check_same_thread=False`.
+- Added a regression test proving a slow synchronous tool does not block the event loop.
+- Fixed a missing `EventCluster` import found by ruff.
+
+Why:
+
+- AgentScope owns the async ReAct loop. Connor's synchronous database/tool persistence should not block that event loop while tools are running.
+- The fix needed to avoid introducing concurrent writes through the shared SQLAlchemy session.
+
+Files changed:
+
+- `app/agents/agentscope_tools.py`
+- `app/agents/runner.py`
+- `app/writing/materialization.py`
+- `tests/agents/test_registry.py`
+- `tests/conftest.py`
+- `docs/worklogs/post-15b-technical-debt.md`
+- `docs/DEV_LOG.md`
+
+Checks:
+
+- `python -m ruff check app\agents\agentscope_tools.py app\agents\runner.py tests\agents\test_registry.py tests\conftest.py`: passed.
+- `python -m pytest tests\agents -q`: 19 passed.
+- `python -m pytest -q --ignore=tests\smoke`: 183 passed.
+- `python -m ruff check .`: passed.
+- `python -m pytest tests\agents tests\writing -q`: 42 passed.
+
+Effect:
+
+- AgentScope tool calls no longer run synchronous Connor DB/tool I/O directly on the event loop.
+- Tool calls remain sequential and trace/evidence persistence still flows through `ToolExecutor`.
+- The test suite now exercises threaded tool execution in a way closer to production runtime behavior.
+
+Open follow-ups:
+
+- Continue through the low-priority source-tool edge cases or move into Phase 16 productionization.
+- Keep `x_cookies.json` out of commits because it is a local credential/session artifact.

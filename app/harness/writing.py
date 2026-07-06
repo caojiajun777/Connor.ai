@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+from time import perf_counter
 from collections.abc import Mapping
 
 from app.agents import AgentRunRequest
@@ -31,6 +33,8 @@ WRITING_PHASES = {
     RunPhase.EDITING,
     RunPhase.FINAL_REVIEW,
 }
+
+logger = logging.getLogger(__name__)
 
 
 class WritingLoopHarness:
@@ -112,6 +116,7 @@ class WritingLoopHarness:
                     decisions.append(exhausted)
                     return run, decisions
                 self._execute_phase_tasks(run, RunPhase.EDITING, tasks_by_phase, full_state=full_state)
+                full_state = self.context.runs.get_full_state(run.id)
                 review_phase = (
                     RunPhase.FINAL_REVIEW
                     if tasks_by_phase.get(RunPhase.FINAL_REVIEW)
@@ -209,9 +214,19 @@ class WritingLoopHarness:
         )
 
         tool_call_count = 0
-        for task in tasks:
+        for task_index, task in enumerate(tasks, start=1):
             if task.phase != phase:
                 raise HarnessError(f"task phase {task.phase.value} does not match {phase.value}")
+            started_at = perf_counter()
+            task_trace = self._record_task_progress(
+                run=run,
+                phase=phase,
+                task=task,
+                task_index=task_index,
+                task_count=len(tasks),
+                status=TraceStatus.STARTED,
+                summary=f"Harness dispatching {task.agent_role.value} writing task.",
+            )
             result = self.context.agent_runner.run(
                 AgentRunRequest(
                     run_id=run.id,
@@ -229,6 +244,22 @@ class WritingLoopHarness:
                     agent_role=task.agent_role,
                     result=result,
                 )
+            duration_ms = int((perf_counter() - started_at) * 1000)
+            self._record_task_progress(
+                run=run,
+                phase=phase,
+                task=task,
+                task_index=task_index,
+                task_count=len(tasks),
+                status=TraceStatus.SUCCEEDED,
+                summary=f"Harness completed {task.agent_role.value} writing task.",
+                parent_id=task_trace.id,
+                duration_ms=duration_ms,
+                metadata={
+                    "tool_call_count": len(result.tool_results),
+                    "duration_ms": duration_ms,
+                },
+            )
 
         latest_run = self.context.runs.require(run.id)
         counters = latest_run.loop_counters.model_copy(
@@ -243,6 +274,49 @@ class WritingLoopHarness:
             phase=phase,
             summary=f"{phase.value} phase completed.",
         )
+
+    def _record_task_progress(
+        self,
+        *,
+        run: RunState,
+        phase: RunPhase,
+        task: AgentTask,
+        task_index: int,
+        task_count: int,
+        status: TraceStatus,
+        summary: str,
+        parent_id: str | None = None,
+        duration_ms: int | None = None,
+        metadata: dict | None = None,
+    ):
+        logger.info(
+            "Connor writing progress: run=%s phase=%s role=%s task=%s/%s status=%s",
+            run.id,
+            phase.value,
+            task.agent_role.value,
+            task_index,
+            task_count,
+            status.value,
+        )
+        event = self.context.trace_service.record_event(
+            run_id=run.id,
+            phase=phase,
+            agent_role=task.agent_role,
+            event_type=TraceEventType.AGENT_DECISION,
+            status=status,
+            summary=summary,
+            parent_id=parent_id,
+            duration_ms=duration_ms,
+            metadata={
+                "harness": True,
+                "task_progress": True,
+                "task_index": task_index,
+                "task_count": task_count,
+                **(metadata or {}),
+            },
+        )
+        self.context.session.flush()
+        return event
 
     def _build_task_context(
         self,

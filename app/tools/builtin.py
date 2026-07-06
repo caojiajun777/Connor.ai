@@ -24,6 +24,9 @@ from app.tools.source_tools import (
     openreview_note_search_tool,
     sec_company_facts_tool,
     sec_company_filings_tool,
+    sec_filing_content_tool,
+    reddit_rss_search_tool,
+    x_search_tool,
 )
 
 
@@ -323,5 +326,59 @@ def create_default_tool_registry() -> ToolRegistry:
             timeout_seconds=20,
         ),
         hacker_news_feed_search_tool,
+    )
+    registry.register(
+        ToolSpec(
+            name="reddit_rss_search",
+            description="Search curated AI/tech subreddits via their public RSS feeds (r/MachineLearning, r/LocalLLaMA, r/OpenAI, r/singularity, r/NVIDIA, r/AMD).",
+            source_type=SourceType.REDDIT,
+            allowed_agent_roles=frozenset(
+                {
+                    AgentRole.ORCHESTRATOR,
+                    AgentRole.SOCIAL_SCOUT,
+                }
+            ),
+            default_source_name="Reddit RSS",
+            default_access_level=SourceAccessLevel.PUBLIC,
+            default_evidence_strength=EvidenceStrength.WEAK,
+            timeout_seconds=20,
+        ),
+        reddit_rss_search_tool,
+    )
+    registry.register(
+        ToolSpec(
+            name="x_search",
+            description="Search X (Twitter) for recent AI/semiconductor posts via headless browser with cookie authentication.",
+            source_type=SourceType.X,
+            allowed_agent_roles=frozenset(
+                {
+                    AgentRole.ORCHESTRATOR,
+                    AgentRole.SOCIAL_SCOUT,
+                }
+            ),
+            default_source_name="X / Twitter Search",
+            default_access_level=SourceAccessLevel.PUBLIC,
+            default_evidence_strength=EvidenceStrength.WEAK,
+            timeout_seconds=60,
+        ),
+        x_search_tool,
+    )
+    registry.register(
+        ToolSpec(
+            name="sec_filing_content",
+            description="Fetch and extract narrative content from SEC EDGAR filing HTML documents (10-K, 10-Q) for finance analysis.",
+            source_type=SourceType.SEC_FILING,
+            allowed_agent_roles=frozenset(
+                {
+                    AgentRole.ORCHESTRATOR,
+                    AgentRole.FINANCE_SCOUT,
+                }
+            ),
+            default_source_name="SEC EDGAR Filing Content",
+            default_access_level=SourceAccessLevel.PUBLIC,
+            default_evidence_strength=EvidenceStrength.OFFICIAL,
+            timeout_seconds=90,
+        ),
+        sec_filing_content_tool,
     )
     return registry

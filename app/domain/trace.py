@@ -4,7 +4,7 @@ from typing import Any
 
 from pydantic import Field, model_validator
 
-from app.domain.base import ArtifactRef, DomainModel, NonEmptyStr, ObjectRef, reject_forbidden_reasoning_keys
+from app.domain.base import ArtifactRef, DomainModel, FORBIDDEN_REASONING_KEYS, NonEmptyStr, ObjectRef
 from app.domain.enums import AgentRole, RunPhase, TraceEventType, TraceStatus
 
 
@@ -32,7 +32,12 @@ class TraceEvent(DomainModel):
     @model_validator(mode="after")
     def validate_trace_boundaries(self) -> "TraceEvent":
         if self.reasoning_summary is not None:
-            reject_forbidden_reasoning_keys({"reasoning_summary": self.reasoning_summary})
+            lower = self.reasoning_summary.lower()
+            for key in FORBIDDEN_REASONING_KEYS:
+                if key in lower:
+                    raise ValueError(
+                        f"reasoning_summary contains forbidden key reference: {key}"
+                    )
         if self.status == TraceStatus.FAILED and not self.error:
             raise ValueError("failed trace events require error")
         return self

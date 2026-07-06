@@ -26,6 +26,7 @@ def test_writing_loop_revises_then_finalizes(db_session) -> None:
         }
     )
     RunRepository(db_session).add(run)
+    persist_bundle(db_session, early_signal_bundle())
     agent_runner = ScriptedWritingAgentRunner(db_session)
     context = HarnessContext(
         db_session,
@@ -81,6 +82,7 @@ def test_writing_loop_materializes_agent_drafts_end_to_end(db_session) -> None:
     assert report.full_json["sections"][0]["section_id"] == "early_signals"
     assert report.evidence_map
     assert report.trace_timeline_ids
+    assert agent_runner.final_review_status_label == "Unconfirmed gray rollout feedback"
 
     timeline = TraceService(db_session).reconstruct_timeline(RUN_ID)
     event_types = [event.event_type for event in timeline.events]
@@ -88,6 +90,16 @@ def test_writing_loop_materializes_agent_drafts_end_to_end(db_session) -> None:
     assert TraceEventType.REVIEW_COMPLETED in event_types
     assert TraceEventType.REPORT_EDITED in event_types
     assert TraceEventType.REPORT_FINALIZED in event_types
+    assert any(
+        event.summary == "Harness dispatching writer writing task."
+        and event.metadata["task_progress"] is True
+        for event in timeline.events
+    )
+    assert any(
+        event.summary == "Harness completed reviewer writing task."
+        and event.metadata["duration_ms"] >= 0
+        for event in timeline.events
+    )
 
     assert [call.agent_role for call in agent_runner.calls] == [
         "writer",
@@ -103,6 +115,7 @@ class DraftOnlyWritingAgentRunner:
     def __init__(self):
         self.calls: list[AgentRunRequest] = []
         self.review_calls = 0
+        self.final_review_status_label: str | None = None
 
     def run(self, request: AgentRunRequest) -> AgentRunResult:
         self.calls.append(request)
@@ -116,6 +129,9 @@ class DraftOnlyWritingAgentRunner:
         if request.agent_role == AgentRole.REVIEWER:
             self.review_calls += 1
             if request.phase == RunPhase.FINAL_REVIEW or self.review_calls > 1:
+                self.final_review_status_label = request.context["review_context"]["report"][
+                    "sections"
+                ][0]["items"][0]["status_label"]
                 output = ReviewerOutput(
                     summary="Reviewer passed revised report.",
                     decision=ReviewDecision.PASS,

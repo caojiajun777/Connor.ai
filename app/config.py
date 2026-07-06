@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     huggingface_token: str | None = Field(default=None)
     tool_user_agent: str = Field(default="Connor.ai/0.1")
     sec_user_agent: str | None = Field(default=None)
+    agent_timeout_seconds: int | None = Field(default=180, gt=0)
+    # X / Twitter search via browser automation
+    x_cookies_file: str = Field(default="x_cookies.json")
     # DeepSeek model provider
     deepseek_api_key: str | None = Field(default=None)
     deepseek_model: str = Field(default="deepseek-chat")
