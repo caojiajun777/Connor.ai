@@ -1,5 +1,9 @@
 """Top-level DailyRunHarness tests."""
 
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from app.db.base import Base
 from app.domain import RunBudgets, RunPhase
 from app.harness import DailyRunHarness, HarnessConfig
 from app.repositories import RunRepository
@@ -119,3 +123,30 @@ def test_daily_run_harness_refuses_to_resume_failed_run(db_session) -> None:
 
     with pytest.raises(HarnessError, match="failed runs cannot be resumed directly"):
         harness.resume(RUN_ID)
+
+
+def test_daily_run_harness_commit_checkpoints_make_created_run_visible(tmp_path) -> None:
+    db_path = tmp_path / "checkpoint.db"
+    engine = create_engine(
+        f"sqlite+pysqlite:///{db_path}",
+        connect_args={"check_same_thread": False},
+        future=True,
+    )
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+
+    with SessionLocal() as writer_session:
+        harness = DailyRunHarness(
+            writer_session,
+            config=HarnessConfig(min_selected_items=1, commit_checkpoints=True),
+        )
+        harness.create_run(
+            run_id=RUN_ID,
+            report_date=run_state_fixture().report_date,
+            objective=run_state_fixture().objective,
+        )
+
+    with SessionLocal() as reader_session:
+        persisted = RunRepository(reader_session).require(RUN_ID)
+
+    assert persisted.phase == RunPhase.INITIALIZE

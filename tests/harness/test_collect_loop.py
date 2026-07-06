@@ -11,7 +11,7 @@ from app.harness import (
     HarnessConfig,
     HarnessContext,
 )
-from app.repositories import ArtifactRepository, RunRepository
+from app.repositories import ArtifactRepository, RunRepository, WatchlistRepository
 from app.services import TraceService
 from tests.domain.fixtures import RUN_ID, early_signal_bundle, run_state_fixture
 from tests.harness.helpers import persist_bundle
@@ -95,6 +95,43 @@ def test_collect_loop_continues_when_scout_agent_execution_fails(db_session) -> 
         event.summary == "Scout task failed; continuing collect."
         and event.status == "failed"
         and event.metadata["skipped_task"] is True
+        for event in timeline.events
+    )
+
+
+def test_collect_loop_continues_when_watchlist_agent_execution_fails(db_session) -> None:
+    run = run_state_fixture().model_copy(update={"budgets": RunBudgets(max_collect_rounds=1)})
+    RunRepository(db_session).add(run)
+    persist_bundle(db_session, early_signal_bundle())
+    agent_runner = FailingScoutAgentRunner()
+    context = HarnessContext(
+        db_session,
+        agent_runner=agent_runner,
+        config=HarnessConfig(min_selected_items=1),
+    )
+
+    next_run, decisions = CollectLoopHarness(context).run(
+        run,
+        tasks_by_phase={
+            RunPhase.WATCHLIST_UPDATE: [
+                AgentTask(
+                    agent_role=AgentRole.WATCHLIST_AGENT,
+                    phase=RunPhase.WATCHLIST_UPDATE,
+                    task="Update watchlist with a forced runtime failure.",
+                )
+            ],
+        },
+    )
+
+    assert len(agent_runner.calls) == 1
+    assert next_run.phase == "writing"
+    assert decisions[-1].outcome == CollectGateOutcome.ENTER_WRITING
+    assert WatchlistRepository(db_session).list_by_run(RUN_ID)
+    timeline = TraceService(db_session).reconstruct_timeline(RUN_ID)
+    assert any(
+        event.summary == "Watchlist task failed; continuing collect."
+        and event.status == "failed"
+        and event.metadata["continue_on_watchlist_agent_error"] is True
         for event in timeline.events
     )
 

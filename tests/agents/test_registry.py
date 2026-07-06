@@ -24,6 +24,7 @@ def test_default_agent_role_registry_binds_output_models_and_tools() -> None:
     agent_registry = create_default_agent_role_registry(tool_registry, agent_timeout_seconds=120)
 
     social_config = agent_registry.require(AgentRole.SOCIAL_SCOUT)
+    finance_config = agent_registry.require(AgentRole.FINANCE_SCOUT)
     clusterer_config = agent_registry.require(AgentRole.CLUSTERER)
     frontier_config = agent_registry.require(AgentRole.FRONTIER_EVALUATOR)
     watchlist_config = agent_registry.require(AgentRole.WATCHLIST_AGENT)
@@ -43,8 +44,10 @@ def test_default_agent_role_registry_binds_output_models_and_tools() -> None:
     assert "manual_seed" not in writer_config.allowed_tool_names
     assert social_config.execution.timeout_seconds == 120
     assert writer_config.execution.timeout_seconds == 120
-    assert social_config.execution.max_iters == 2
+    assert social_config.execution.max_iters == 4
     assert social_config.execution.max_tool_calls == 1
+    assert finance_config.execution.max_iters == 4
+    assert finance_config.execution.max_tool_calls == 2
     assert clusterer_config.execution.max_iters == 1
     assert clusterer_config.execution.max_tool_calls == 0
     assert writer_config.execution.max_iters == 1

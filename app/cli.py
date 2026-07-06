@@ -65,7 +65,9 @@ def build_writing_tasks(objective: str) -> dict[RunPhase, list[AgentTask]]:
                     "evaluations, evidence, watchlist, and thread context. "
                     "Produce report_drafts with sections and evidence_map coverage. "
                     "Early Signals must stay explicitly uncertain; never write them as "
-                    "confirmed facts. "
+                    "confirmed facts. Write human-facing narrative fields in Simplified "
+                    "Chinese while preserving English names, tickers, model names, APIs, "
+                    "URLs, and paper titles. "
                     f"Objective: {objective}"
                 ),
                 context={
@@ -86,6 +88,7 @@ def build_writing_tasks(objective: str) -> dict[RunPhase, list[AgentTask]]:
                     "confirmed facts, (2) every report item has evidence coverage, "
                     "(3) Markdown matches the structured JSON sections, "
                     "(4) tech-finance items include data, tickers, and impact chain. "
+                    "(5) human-facing narrative body is written in Simplified Chinese. "
                     "Return review_drafts with specific issues and a clear decision. "
                     f"Objective: {objective}"
                 ),
@@ -98,6 +101,7 @@ def build_writing_tasks(objective: str) -> dict[RunPhase, list[AgentTask]]:
                 task=(
                     "Revise the draft report based on the latest review issues. "
                     "Fix early-signal language, evidence gaps, and section consistency. "
+                    "Rewrite human-facing narrative fields in Simplified Chinese. "
                     "Return revised_report_drafts. Do not add facts beyond evidence. "
                     f"Objective: {objective}"
                 ),
@@ -109,7 +113,8 @@ def build_writing_tasks(objective: str) -> dict[RunPhase, list[AgentTask]]:
                 phase=RunPhase.FINAL_REVIEW,
                 task=(
                     "Final review of the revised report. Verify all reviewer issues "
-                    "have been addressed. Return review_drafts with decision PASS "
+                    "have been addressed and the human-facing body is in Simplified Chinese. "
+                    "Return review_drafts with decision PASS "
                     "if the report is ready to finalize, REVISE if issues remain. "
                     f"Objective: {objective}"
                 ),
@@ -164,7 +169,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         harness = DailyRunHarness(
             session=session,
             agent_runner=agent_runner,
-            config=HarnessConfig(min_selected_items=1),
+            config=HarnessConfig(
+                min_selected_items=2,
+                min_report_body_items=2,
+                commit_checkpoints=True,
+            ),
         )
         print("  Tool registry, role registry, and model factory are ready.")
 

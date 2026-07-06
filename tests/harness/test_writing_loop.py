@@ -31,7 +31,7 @@ def test_writing_loop_revises_then_finalizes(db_session) -> None:
     context = HarnessContext(
         db_session,
         agent_runner=agent_runner,
-        config=HarnessConfig(max_writing_revisions=2),
+        config=HarnessConfig(max_writing_revisions=2, min_report_body_items=1),
     )
 
     next_run, decisions = WritingLoopHarness(context).run(run, tasks_by_phase=writing_tasks())
@@ -65,7 +65,7 @@ def test_writing_loop_materializes_agent_drafts_end_to_end(db_session) -> None:
     context = HarnessContext(
         db_session,
         agent_runner=agent_runner,
-        config=HarnessConfig(max_writing_revisions=2),
+        config=HarnessConfig(max_writing_revisions=2, min_report_body_items=1),
     )
 
     next_run, decisions = WritingLoopHarness(context).run(run, tasks_by_phase=writing_tasks())
@@ -178,8 +178,8 @@ class DraftOnlyWritingAgentRunner:
 def _report_draft(status_label: str, report_id: str | None = None) -> ReportDraft:
     return ReportDraft(
         report_id=report_id,
-        overview_judgments=["A specific but unconfirmed API-surface signal needs tracking."],
-        tomorrow_focus=["Check first-party changelog and SDK commits."],
+        overview_judgments=["一个具体但未确认的 API surface 信号需要继续追踪。"],
+        tomorrow_focus=["检查第一方 changelog 和 SDK commit。"],
         sections=[
             ReportSectionDraft(
                 section_id="early_signals",
@@ -190,19 +190,18 @@ def _report_draft(status_label: str, report_id: str | None = None) -> ReportDraf
                         category="early_signal",
                         status_label=status_label,
                         core_information=(
-                            "Community discussion and third-party code suggest a possible "
-                            "new reasoning-control option."
+                            "社区讨论和第三方代码显示，OpenAI 可能正在测试新的 reasoning-control 选项。"
                         ),
                         why_it_matters=(
-                            "It may affect how developers tune cost, latency, and reasoning depth."
+                            "这会影响开发者如何在成本、延迟和推理深度之间做权衡。"
                         ),
                         potential_impact=(
-                            "If confirmed, agent frameworks may expose finer reasoning controls."
+                            "如果后续被确认，agent 框架可能会暴露更细的 reasoning 控制能力。"
                         ),
                         evidence_ids=["ev_openai_hn_reasoning", "ev_openai_wrapper_commit"],
                         cluster_ids=["cl_openai_reasoning_api"],
-                        followup_points=["Check official docs and first-party SDK commits."],
-                        uncertainty_label="low confidence, high trackability",
+                        followup_points=["检查官方文档和第一方 SDK commit 是否出现同名参数。"],
+                        uncertainty_label="低置信度，但可追踪性较高。",
                     )
                 ],
             )

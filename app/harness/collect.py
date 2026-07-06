@@ -130,7 +130,7 @@ class CollectLoopHarness:
                 "harness": True,
             },
         )
-        self.context.session.flush()
+        self.context.checkpoint()
         return next_run
 
     def _start_collect_round(self, run: RunState) -> RunState:
@@ -155,7 +155,7 @@ class CollectLoopHarness:
             summary=f"Collect round {counters.collect_rounds} started.",
             metadata={"collect_round": counters.collect_rounds, "harness": True},
         )
-        self.context.session.flush()
+        self.context.checkpoint()
         return next_run
 
     def _execute_phase_tasks(
@@ -181,11 +181,13 @@ class CollectLoopHarness:
             summary=f"{phase.value} phase started with {len(tasks)} task(s).",
             metadata={"task_count": len(tasks), "harness": True},
         )
+        self.context.checkpoint()
 
         if phase == RunPhase.WATCHLIST_UPDATE and self.context.config.expire_due_watchlist_items:
             self.watchlist_lifecycle.expire_due_items(run=run, phase=phase)
 
         tool_call_count = 0
+        successful_task_count = 0
         for task_index, task in enumerate(tasks, start=1):
             if task.phase != phase:
                 raise HarnessError(f"task phase {task.phase.value} does not match {phase.value}")
@@ -210,28 +212,37 @@ class CollectLoopHarness:
                     )
                 )
             except AgentScopeExecutionError as exc:
-                if phase != RunPhase.SCOUTING or not self.context.config.continue_on_scout_agent_error:
+                if not self._can_continue_after_agent_error(phase):
                     raise
                 duration_ms = int((perf_counter() - started_at) * 1000)
+                skipped_summary = (
+                    "Scout task failed; continuing collect."
+                    if phase == RunPhase.SCOUTING
+                    else "Watchlist task failed; continuing collect."
+                )
                 self.context.trace_service.record_event(
                     run_id=run.id,
                     phase=phase,
                     agent_role=task.agent_role,
                     event_type=TraceEventType.AGENT_DECISION,
                     status=TraceStatus.FAILED,
-                    summary="Scout task failed; continuing collect.",
+                    summary=skipped_summary,
                     error=str(exc) or type(exc).__name__,
                     parent_id=task_trace.id,
                     duration_ms=duration_ms,
                     metadata={
                         "harness": True,
                         "skipped_task": True,
-                        "continue_on_scout_agent_error": True,
+                        "continue_on_agent_error": True,
+                        "continue_on_scout_agent_error": phase == RunPhase.SCOUTING,
+                        "continue_on_watchlist_agent_error": phase == RunPhase.WATCHLIST_UPDATE,
                         "duration_ms": duration_ms,
                     },
                 )
+                self.context.checkpoint()
                 continue
             tool_call_count += len(result.tool_results)
+            successful_task_count += 1
             if phase == RunPhase.SCOUTING and self.context.config.materialize_scout_candidates:
                 self.materializer.materialize(
                     run=run,
@@ -285,7 +296,7 @@ class CollectLoopHarness:
 
         if (
             phase == RunPhase.WATCHLIST_UPDATE
-            and not tasks
+            and successful_task_count == 0
             and self.context.config.auto_materialize_watchlist_from_evaluations
         ):
             self.watchlist_lifecycle.sync_evaluation_memory(run=run, phase=phase)
@@ -303,6 +314,13 @@ class CollectLoopHarness:
             phase=phase,
             summary=f"{phase.value} phase completed.",
         )
+
+    def _can_continue_after_agent_error(self, phase: RunPhase) -> bool:
+        if phase == RunPhase.SCOUTING:
+            return self.context.config.continue_on_scout_agent_error
+        if phase == RunPhase.WATCHLIST_UPDATE:
+            return self.context.config.continue_on_watchlist_agent_error
+        return False
 
     def _record_task_progress(
         self,
@@ -344,7 +362,7 @@ class CollectLoopHarness:
                 **(metadata or {}),
             },
         )
-        self.context.session.flush()
+        self.context.checkpoint()
         return event
 
     def _should_bootstrap_single_agent(
@@ -416,7 +434,7 @@ class CollectLoopHarness:
             output_payload=decision.model_dump(mode="json"),
             metadata={"outcome": decision.outcome.value, "harness": True},
         )
-        self.context.session.flush()
+        self.context.checkpoint()
 
     def _apply_decision(self, run: RunState, decision: CollectGateDecision) -> RunState:
         latest_run = self.context.runs.require(run.id)
@@ -440,7 +458,7 @@ class CollectLoopHarness:
                 phase=RunPhase.EVALUATION_GATE,
                 summary="Collect gate passed; entering writing loop.",
             )
-            self.context.session.flush()
+            self.context.checkpoint()
             return next_run
 
         if decision.outcome == CollectGateOutcome.FOLLOWUP_NOW:
@@ -462,7 +480,7 @@ class CollectLoopHarness:
                 phase=RunPhase.FOLLOWUP,
                 summary="Collect gate requested follow-up.",
             )
-            self.context.session.flush()
+            self.context.checkpoint()
             return next_run
 
         if decision.outcome in {
@@ -483,7 +501,7 @@ class CollectLoopHarness:
                 }
             )
             self.context.runs.add(next_run)
-            self.context.session.flush()
+            self.context.checkpoint()
             return next_run
 
         if decision.outcome == CollectGateOutcome.NEEDS_MANUAL_REVIEW:
@@ -497,7 +515,7 @@ class CollectLoopHarness:
                 }
             )
             self.context.runs.add(next_run)
-            self.context.session.flush()
+            self.context.checkpoint()
             return next_run
 
         return self.context.fail_run(

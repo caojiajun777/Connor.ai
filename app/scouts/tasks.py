@@ -36,14 +36,7 @@ class ScoutTaskFactory:
                     "evidence, return followup_queries and no candidate_drafts. "
                     "Use uncertainty and followup_questions."
                 ),
-                "tool_use_policy": (
-                    "Use at most one source-tool round unless the first tool fails. "
-                    "Choose the single most relevant source tool for this Scout profile. "
-                    "After a tool returns evidence_ids, stop calling tools and produce "
-                    "the final structured JSON immediately. "
-                    "Never call mock_search in a production-style run unless the task "
-                    "explicitly asks for deterministic mock evidence."
-                ),
+                "tool_use_policy": self._tool_use_policy(role),
                 **(context or {}),
             },
         )
@@ -58,3 +51,24 @@ class ScoutTaskFactory:
             self.create_task(profile.role, objective=objective, context=context)
             for profile in sorted(self.profiles.list_profiles(), key=lambda item: item.role.value)
         ]
+
+    @staticmethod
+    def _tool_use_policy(role: AgentRole) -> str:
+        if role == AgentRole.FINANCE_SCOUT:
+            return (
+                "Use at most two source-tool calls. If sec_company_filings returns "
+                "only filing metadata, make one follow-up call to sec_filing_content "
+                "or sec_company_facts for the same ticker/CIK before final JSON. "
+                "If the first call already returns concrete financial figures or "
+                "filing sections, stop and produce the final structured JSON. "
+                "Never call mock_search in a production-style run unless the task "
+                "explicitly asks for deterministic mock evidence."
+            )
+        return (
+            "Use at most one source-tool round unless the first tool fails. "
+            "Choose the single most relevant source tool for this Scout profile. "
+            "After a tool returns evidence_ids, stop calling tools and produce "
+            "the final structured JSON immediately. "
+            "Never call mock_search in a production-style run unless the task "
+            "explicitly asks for deterministic mock evidence."
+        )

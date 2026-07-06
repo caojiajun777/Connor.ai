@@ -130,7 +130,7 @@ class WritingLoopHarness:
                         update={"phase": RunPhase.FINAL_REVIEW, "updated_at": utc_now()}
                     )
                     self.context.runs.add(run)
-                    self.context.session.flush()
+                    self.context.checkpoint()
                 self._execute_phase_tasks(run, review_phase, tasks_by_phase, full_state=full_state)
                 continue
 
@@ -185,7 +185,7 @@ class WritingLoopHarness:
             summary=f"Writing round {counters.writing_rounds} started.",
             metadata={"writing_round": counters.writing_rounds, "harness": True},
         )
-        self.context.session.flush()
+        self.context.checkpoint()
         return next_run
 
     def _execute_phase_tasks(
@@ -212,6 +212,7 @@ class WritingLoopHarness:
             summary=f"{phase.value} phase started with {len(tasks)} task(s).",
             metadata={"task_count": len(tasks), "harness": True},
         )
+        self.context.checkpoint()
 
         tool_call_count = 0
         for task_index, task in enumerate(tasks, start=1):
@@ -315,7 +316,7 @@ class WritingLoopHarness:
                 **(metadata or {}),
             },
         )
-        self.context.session.flush()
+        self.context.checkpoint()
         return event
 
     def _build_task_context(
@@ -356,7 +357,7 @@ class WritingLoopHarness:
             output_payload=decision.model_dump(mode="json"),
             metadata={"outcome": decision.outcome.value, "harness": True},
         )
-        self.context.session.flush()
+        self.context.checkpoint()
 
     def _apply_decision(self, run: RunState, decision: WritingGateDecision) -> RunState:
         latest_run = self.context.runs.require(run.id)
@@ -391,7 +392,7 @@ class WritingLoopHarness:
                 payload=report.model_dump(mode="json"),
                 kind=ArtifactKind.REPORT_SNAPSHOT,
             )
-            self.context.session.flush()
+            self.context.checkpoint()
             return finalized_run
 
         if decision.outcome == WritingGateOutcome.REVISE:
@@ -407,7 +408,7 @@ class WritingLoopHarness:
                 }
             )
             self.context.runs.add(revised_run)
-            self.context.session.flush()
+            self.context.checkpoint()
             return revised_run
 
         if decision.outcome == WritingGateOutcome.REOPEN_COLLECT:
@@ -423,7 +424,7 @@ class WritingLoopHarness:
                 }
             )
             self.context.runs.add(reopened)
-            self.context.session.flush()
+            self.context.checkpoint()
             return reopened
 
         if decision.outcome == WritingGateOutcome.NEEDS_MANUAL_REVIEW:
@@ -436,7 +437,7 @@ class WritingLoopHarness:
                 }
             )
             self.context.runs.add(paused)
-            self.context.session.flush()
+            self.context.checkpoint()
             return paused
 
         if decision.outcome == WritingGateOutcome.FAIL:

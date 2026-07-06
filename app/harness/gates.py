@@ -8,6 +8,7 @@ from app.domain.enums import (
     EvaluationDecision,
     ReportStatus,
     ReviewDecision,
+    WritePolicy,
 )
 from app.harness.config import HarnessConfig
 from app.harness.decisions import (
@@ -32,9 +33,13 @@ FOLLOWUP_DECISIONS = {
 WRITEABLE_DECISIONS = {
     EvaluationDecision.SELECT_CONFIRMED,
     EvaluationDecision.SELECT_EARLY_SIGNAL,
-    EvaluationDecision.SHORT_WATCH,
     EvaluationDecision.FOLLOWUP_NOW,
     EvaluationDecision.FOLLOWUP_LATER,
+}
+
+WRITEABLE_POLICIES = {
+    WritePolicy.WRITE_NOW,
+    WritePolicy.WRITE_WITH_CAVEAT,
 }
 
 REPORT_BUCKETS = {
@@ -94,13 +99,15 @@ class QualityGateService:
             "archive_count": len(full_state.archives),
             "thread_count": len(full_state.threads),
             "selected_cluster_count": len(selected_cluster_ids),
+            "min_selected_items": self.config.min_selected_items,
+            "min_report_body_items": self._min_report_body_items(),
             "followup_query_count": len(followup_queries),
             "collect_rounds": run.loop_counters.collect_rounds,
             "followup_rounds": run.loop_counters.followup_rounds,
             **coverage_metadata["bucket_counts"],
         }
 
-        if len(selected_cluster_ids) >= self.config.min_selected_items:
+        if len(selected_cluster_ids) >= self._min_report_body_items():
             return CollectGateDecision(
                 outcome=CollectGateOutcome.ENTER_WRITING,
                 reasoning_summary=(
@@ -111,6 +118,37 @@ class QualityGateService:
                 metrics=metrics,
                 metadata=coverage_metadata,
             )
+
+        if len(selected_cluster_ids) >= self.config.min_selected_items:
+            if (
+                followup_queries
+                and run.loop_counters.followup_rounds < run.budgets.max_followup_rounds
+            ):
+                return CollectGateDecision(
+                    outcome=CollectGateOutcome.FOLLOWUP_NOW,
+                    reasoning_summary=(
+                        "Collect gate has publishable material but needs more body-item "
+                        "breadth for production-quality reporting."
+                    ),
+                    selected_cluster_ids=selected_cluster_ids,
+                    followup_queries=followup_queries,
+                    metrics=metrics,
+                    risk_flags=["insufficient_report_body_breadth"],
+                    metadata=coverage_metadata,
+                )
+            if run.loop_counters.collect_rounds < run.budgets.max_collect_rounds:
+                return CollectGateDecision(
+                    outcome=CollectGateOutcome.CONTINUE_COLLECTING,
+                    reasoning_summary=(
+                        "Collect gate has enough selected material for a minimal report, "
+                        "but production-quality body breadth is still below threshold."
+                    ),
+                    selected_cluster_ids=selected_cluster_ids,
+                    followup_queries=followup_queries,
+                    metrics=metrics,
+                    risk_flags=["insufficient_report_body_breadth"],
+                    metadata=coverage_metadata,
+                )
 
         if recluster_ids and run.loop_counters.collect_rounds < run.budgets.max_collect_rounds:
             return CollectGateDecision(
@@ -339,7 +377,7 @@ class QualityGateService:
             writeable_evaluations = [
                 evaluation
                 for evaluation in evaluations
-                if evaluation.decision in WRITEABLE_DECISIONS
+                if self._evaluation_is_writeable(evaluation)
             ]
             if not writeable_evaluations:
                 continue
@@ -357,6 +395,12 @@ class QualityGateService:
             ]
             for bucket, candidates in grouped.items()
         }
+
+    @staticmethod
+    def _evaluation_is_writeable(evaluation: EvaluationResult) -> bool:
+        if evaluation.write_policy is not None:
+            return evaluation.write_policy in WRITEABLE_POLICIES
+        return evaluation.decision in WRITEABLE_DECISIONS
 
     @staticmethod
     def _evaluations_by_cluster(
@@ -406,11 +450,30 @@ class QualityGateService:
             missing.append("missing_evidence_map")
         if not report.full_json.get("tomorrow_focus"):
             missing.append("missing_tomorrow_focus")
+        body_item_count = self._report_body_item_count(report)
+        min_body_items = self._min_report_body_items()
+        if body_item_count < min_body_items:
+            missing.append(
+                f"insufficient_report_body_items:{body_item_count}/{min_body_items}"
+            )
         if report.status == ReportStatus.FAILED:
             missing.append("report_status_failed")
         if self.config.require_report_bucket_coverage:
             missing.extend(self._missing_selected_cluster_coverage(report, full_state))
         return missing
+
+    def _min_report_body_items(self) -> int:
+        return self.config.min_report_body_items or self.config.min_selected_items
+
+    @staticmethod
+    def _report_body_item_count(report: DailyReport) -> int:
+        return sum(
+            1
+            for section in report.sections
+            if section.section_id != "watchlist"
+            for item in section.items
+            if item.category != CandidateCategory.WATCHLIST_UPDATE
+        )
 
     @staticmethod
     def _has_blocking_review_issue(review: ReviewResult) -> bool:

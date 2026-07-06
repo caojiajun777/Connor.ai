@@ -68,6 +68,7 @@ class FullRunState:
 class RunRepository(DomainRepository[RunState, RunRecord]):
     domain_model = RunState
     record_model = RunRecord
+    warn_on_payload_merge = False
 
     def __init__(self, session: Session):
         super().__init__(session)
@@ -162,4 +163,3 @@ class RunRepository(DomainRepository[RunState, RunRecord]):
         if name == "trace_events":
             return sorted(objects, key=lambda item: item.seq)
         return sorted(objects, key=lambda item: item.created_at)
-

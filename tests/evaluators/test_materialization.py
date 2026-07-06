@@ -13,6 +13,7 @@ from app.domain import (
     RunPhase,
     TraceEventType,
     TraceStatus,
+    WritePolicy,
 )
 from app.evaluators.materialization import EvaluatorOutputMaterializer
 from app.exceptions import HarnessError
@@ -131,6 +132,101 @@ def test_evaluator_outputs_materialize_to_evaluations_and_trace(db_session) -> N
         [event.event_type for event in timeline.events].count(TraceEventType.EVALUATION_CREATED)
         == 3
     )
+
+
+def test_evaluator_downgrades_weak_single_source_community_signal(db_session) -> None:
+    context = HarnessContext(db_session)
+    run = run_state_fixture()
+    context.runs.add(run)
+    weak = early_signal_bundle()
+    weak_evidence = weak["evidence"][0].model_copy(
+        update={"metadata": {"score": 1, "comment_count": 0}}
+    )
+    weak_candidate = weak["candidate"].model_copy(
+        update={"evidence_ids": [weak_evidence.id]}
+    )
+    weak_cluster = weak["cluster"].model_copy(
+        update={"evidence_ids": [weak_evidence.id]}
+    )
+    _persist_bundle_without_evaluation(
+        db_session,
+        {
+            **weak,
+            "evidence": [weak_evidence],
+            "candidate": weak_candidate,
+            "cluster": weak_cluster,
+        },
+    )
+
+    materialized = EvaluatorOutputMaterializer(context).materialize(
+        run=run,
+        phase=RunPhase.EVALUATING,
+        agent_role=AgentRole.FRONTIER_EVALUATOR,
+        result=_result(
+            role=AgentRole.FRONTIER_EVALUATOR,
+            draft=EvaluationDraft(
+                cluster_id=weak_cluster.id,
+                evaluator_type=EvaluationType.FRONTIER,
+                dimension_scores={
+                    "information_gap": 8,
+                    "specificity": 6,
+                    "source_proximity": 3,
+                    "potential_impact": 7,
+                    "trackability": 8,
+                },
+                total_score=6.4,
+                decision=EvaluationDecision.SELECT_EARLY_SIGNAL,
+                reasoning_summary="Interesting but currently one weak community post.",
+                required_followups=["Find another independent source."],
+                missing_evidence=["No corroborating source yet."],
+            ),
+        ),
+    )
+
+    evaluation = EvaluationRepository(db_session).require(materialized.evaluation_ids[0])
+    cluster = EventClusterRepository(db_session).require(weak_cluster.id)
+
+    assert materialized.selected_cluster_ids == []
+    assert evaluation.decision == EvaluationDecision.SHORT_WATCH
+    assert evaluation.write_policy == WritePolicy.CONTEXT_ONLY
+    assert evaluation.metadata["normalized_decision_reason"] == "weak_single_source_community_signal"
+    assert cluster.selected is False
+
+
+def test_evaluator_repairs_recluster_without_risk_flags(db_session) -> None:
+    context = HarnessContext(db_session)
+    run = run_state_fixture()
+    context.runs.add(run)
+    early = _persist_bundle_without_evaluation(db_session, early_signal_bundle())
+
+    materialized = EvaluatorOutputMaterializer(context).materialize(
+        run=run,
+        phase=RunPhase.EVALUATING,
+        agent_role=AgentRole.FRONTIER_EVALUATOR,
+        result=_result(
+            role=AgentRole.FRONTIER_EVALUATOR,
+            draft=EvaluationDraft(
+                cluster_id=early["cluster"].id,
+                evaluator_type=EvaluationType.FRONTIER,
+                dimension_scores={
+                    "information_gap": 6,
+                    "specificity": 5,
+                    "source_proximity": 4,
+                    "potential_impact": 5,
+                    "trackability": 7,
+                },
+                total_score=5.4,
+                decision=EvaluationDecision.RECLUSTER,
+                reasoning_summary="The cluster may mix unrelated signals.",
+            ),
+        ),
+    )
+
+    evaluation = EvaluationRepository(db_session).require(materialized.evaluation_ids[0])
+
+    assert evaluation.decision == EvaluationDecision.RECLUSTER
+    assert evaluation.risk_flags == ["recluster_requested_without_risk_flags"]
+    assert evaluation.metadata["repaired_missing_recluster_risk_flags"] is True
 
 
 def test_invalid_evaluator_draft_raises_harness_error(db_session) -> None:

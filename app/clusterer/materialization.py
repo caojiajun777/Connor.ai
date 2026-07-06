@@ -110,30 +110,31 @@ class ClusterOutputMaterializer:
                     },
                 )
                 continue
-            cluster = self._create_or_merge_cluster(run=run, phase=phase, draft=draft)
-            self.clusters.add(cluster)
-            materialized.cluster_ids.append(cluster.id)
-            self.context.trace_service.object_created(
-                run_id=run.id,
-                phase=phase,
-                agent_role=AgentRole.CLUSTERER,
-                event_type=TraceEventType.CLUSTER_CREATED,
-                created_object=cluster,
-                summary=f"Clusterer materialized cluster: {cluster.title}",
-            )
-
-            if bootstrap_evaluations:
-                evaluation = self._create_bootstrap_evaluation(run=run, cluster=cluster)
-                self.evaluations.add(evaluation)
-                materialized.evaluation_ids.append(evaluation.id)
+            for next_draft in self._split_overbroad_draft(run.id, draft):
+                cluster = self._create_or_merge_cluster(run=run, phase=phase, draft=next_draft)
+                self.clusters.add(cluster)
+                materialized.cluster_ids.append(cluster.id)
                 self.context.trace_service.object_created(
                     run_id=run.id,
-                    phase=RunPhase.EVALUATING,
-                    agent_role=evaluation.created_by_agent,
-                    event_type=TraceEventType.EVALUATION_CREATED,
-                    created_object=evaluation,
-                    summary=f"Clusterer bootstrap evaluation created: {evaluation.decision.value}",
+                    phase=phase,
+                    agent_role=AgentRole.CLUSTERER,
+                    event_type=TraceEventType.CLUSTER_CREATED,
+                    created_object=cluster,
+                    summary=f"Clusterer materialized cluster: {cluster.title}",
                 )
+
+                if bootstrap_evaluations:
+                    evaluation = self._create_bootstrap_evaluation(run=run, cluster=cluster)
+                    self.evaluations.add(evaluation)
+                    materialized.evaluation_ids.append(evaluation.id)
+                    self.context.trace_service.object_created(
+                        run_id=run.id,
+                        phase=RunPhase.EVALUATING,
+                        agent_role=evaluation.created_by_agent,
+                        event_type=TraceEventType.EVALUATION_CREATED,
+                        created_object=evaluation,
+                        summary=f"Clusterer bootstrap evaluation created: {evaluation.decision.value}",
+                    )
 
         self._update_run_lineage(run.id, materialized)
         self.context.session.flush()
@@ -190,6 +191,185 @@ class ClusterOutputMaterializer:
                 },
             }
         )
+
+    def _split_overbroad_draft(
+        self,
+        run_id: str,
+        draft: ClusterDraft,
+    ) -> list[ClusterDraft]:
+        if len(draft.candidate_ids) <= 1:
+            return [draft]
+
+        candidates = self._candidate_map(run_id, draft.candidate_ids)
+        if self._should_split_unrelated_mixed_confirmation(candidates):
+            return self._split_draft_by_candidate_signature(
+                draft=draft,
+                candidates=list(candidates.values()),
+                metadata_reason="unrelated_mixed_confirmation_cluster",
+            )
+
+        if draft.category not in CONFIRMED_CATEGORIES:
+            return [draft]
+
+        if any(candidate.category not in CONFIRMED_CATEGORIES for candidate in candidates.values()):
+            return [draft]
+
+        grouped: dict[str, list[CandidateItem]] = {}
+        for candidate in candidates.values():
+            grouped.setdefault(self._official_candidate_signature(candidate), []).append(candidate)
+        if len(grouped) <= 1:
+            return [draft]
+
+        return self._split_draft_groups(
+            draft=draft,
+            grouped=grouped,
+            metadata_reason="overbroad_official_cluster",
+        )
+
+    def _split_draft_by_candidate_signature(
+        self,
+        *,
+        draft: ClusterDraft,
+        candidates: list[CandidateItem],
+        metadata_reason: str,
+    ) -> list[ClusterDraft]:
+        grouped: dict[str, list[CandidateItem]] = {}
+        for candidate in candidates:
+            grouped.setdefault(self._candidate_topic_signature(candidate), []).append(candidate)
+        if len(grouped) <= 1:
+            return [draft]
+        return self._split_draft_groups(
+            draft=draft,
+            grouped=grouped,
+            metadata_reason=metadata_reason,
+        )
+
+    def _split_draft_groups(
+        self,
+        *,
+        draft: ClusterDraft,
+        grouped: dict[str, list[CandidateItem]],
+        metadata_reason: str,
+    ) -> list[ClusterDraft]:
+        split_drafts: list[ClusterDraft] = []
+        for signature, group in grouped.items():
+            candidate_ids = [candidate.id for candidate in group]
+            evidence_ids = self._dedupe(
+                [
+                    evidence_id
+                    for candidate in group
+                    for evidence_id in candidate.evidence_ids
+                ]
+            )
+            split_drafts.append(
+                draft.model_copy(
+                    update={
+                        "category": self._group_category(group, fallback=draft.category),
+                        "title": group[0].claim_summary[:180],
+                        "canonical_claim": group[0].claim_summary,
+                        "candidate_ids": candidate_ids,
+                        "evidence_ids": evidence_ids,
+                        "entities": self._dedupe(
+                            [
+                                entity
+                                for candidate in group
+                                for entity in candidate.entities
+                            ]
+                        ),
+                        "tickers": self._dedupe(
+                            [
+                                ticker
+                                for candidate in group
+                                for ticker in candidate.tickers
+                            ]
+                        ),
+                        "topics": self._dedupe(
+                            [
+                                topic
+                                for candidate in group
+                                for topic in candidate.topics
+                            ]
+                        ),
+                        "timeline": [],
+                        "dedupe_key": None,
+                        "metadata": {
+                            **draft.metadata,
+                            "split_overbroad_official_cluster": True,
+                            "split_reason": metadata_reason,
+                            "original_candidate_ids": draft.candidate_ids,
+                            "topic_signature": signature,
+                        },
+                    }
+                )
+            )
+        return split_drafts
+
+    @staticmethod
+    def _group_category(
+        group: list[CandidateItem],
+        *,
+        fallback: CandidateCategory,
+    ) -> CandidateCategory:
+        categories = {candidate.category for candidate in group}
+        if len(categories) == 1:
+            return next(iter(categories))
+        if any(category in CONFIRMED_CATEGORIES for category in categories):
+            return CandidateCategory.OFFICIAL_UPDATE
+        if CandidateCategory.TECH_FINANCE in categories:
+            return CandidateCategory.TECH_FINANCE
+        return fallback
+
+    @staticmethod
+    def _should_split_unrelated_mixed_confirmation(
+        candidates: dict[str, CandidateItem],
+    ) -> bool:
+        confirmations = [
+            candidate
+            for candidate in candidates.values()
+            if candidate.category in CONFIRMED_CATEGORIES
+        ]
+        others = [
+            candidate
+            for candidate in candidates.values()
+            if candidate.category not in CONFIRMED_CATEGORIES
+        ]
+        if not confirmations or not others:
+            return False
+        return not any(
+            ClusterOutputMaterializer._candidate_overlap(left, right)
+            for left in confirmations
+            for right in others
+        )
+
+    @staticmethod
+    def _candidate_overlap(left: CandidateItem, right: CandidateItem) -> bool:
+        for field_name in ("entities", "tickers", "topics"):
+            left_values = {value.lower() for value in getattr(left, field_name) if value}
+            right_values = {value.lower() for value in getattr(right, field_name) if value}
+            if left_values.intersection(right_values):
+                return True
+        return False
+
+    def _official_candidate_signature(self, candidate: CandidateItem) -> str:
+        evidence_titles = []
+        for evidence_id in candidate.evidence_ids:
+            evidence = self.evidence.get(evidence_id)
+            if evidence is not None:
+                evidence_titles.append(evidence.title)
+        basis = " ".join([candidate.claim_summary, *evidence_titles])
+        return self._slug(basis)[:80]
+
+    def _candidate_topic_signature(self, candidate: CandidateItem) -> str:
+        basis = " ".join(
+            [
+                candidate.category.value,
+                candidate.claim_summary,
+                *candidate.entities,
+                *candidate.tickers,
+                *candidate.topics,
+            ]
+        )
+        return self._slug(basis)[:80]
 
     def _fallback_candidates_for_draft(
         self,

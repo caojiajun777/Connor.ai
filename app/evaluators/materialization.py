@@ -12,11 +12,15 @@ from app.agents.schemas import AgentRunResult
 from app.core.ids import IdPrefix, deterministic_id
 from app.domain import (
     AgentRole,
+    CandidateCategory,
     EvaluationDecision,
     EvaluationResult,
     EventCluster,
+    EvidenceItem,
+    EvidenceStrength,
     RunPhase,
     RunState,
+    SourceType,
     TraceEventType,
     TraceStatus,
     WritePolicy,
@@ -28,7 +32,12 @@ from app.evaluators.profiles import (
     create_default_evaluator_profile_registry,
 )
 from app.exceptions import HarnessError
-from app.repositories import EvaluationRepository, EventClusterRepository, RunRepository
+from app.repositories import (
+    EvaluationRepository,
+    EventClusterRepository,
+    EvidenceRepository,
+    RunRepository,
+)
 from app.services import TraceService
 
 
@@ -64,6 +73,7 @@ class EvaluatorOutputMaterializer:
         self.profile_registry = profile_registry or create_default_evaluator_profile_registry()
         self.clusters = EventClusterRepository(context.session)
         self.evaluations = EvaluationRepository(context.session)
+        self.evidence = EvidenceRepository(context.session)
 
     def materialize(
         self,
@@ -143,6 +153,8 @@ class EvaluatorOutputMaterializer:
                 continue
             draft = self._normalize_score_scale(draft)
             draft = self._normalize_decision_for_score(draft)
+            draft = self._normalize_weak_frontier_signal(draft, cluster)
+            draft = self._repair_decision_requirements(draft)
             write_policy = self._calibrate_write_policy(draft)
             try:
                 profile.validate_draft(draft, cluster)
@@ -251,6 +263,120 @@ class EvaluatorOutputMaterializer:
                 }
             )
         return draft
+
+    @staticmethod
+    def _repair_decision_requirements(draft: EvaluationDraft) -> EvaluationDraft:
+        metadata = dict(draft.metadata)
+        updates: dict[str, object] = {}
+
+        if draft.decision == EvaluationDecision.RECLUSTER and not draft.risk_flags:
+            updates["risk_flags"] = ["recluster_requested_without_risk_flags"]
+            metadata["repaired_missing_recluster_risk_flags"] = True
+
+        if (
+            draft.decision
+            in {
+                EvaluationDecision.FOLLOWUP_NOW,
+                EvaluationDecision.FOLLOWUP_LATER,
+                EvaluationDecision.SHORT_WATCH,
+            }
+            and not draft.required_followups
+        ):
+            updates["required_followups"] = (
+                list(draft.missing_evidence)
+                or [
+                    "Re-run targeted follow-up for this cluster before promoting it."
+                ]
+            )
+            metadata["repaired_missing_required_followups"] = True
+
+        if (
+            draft.decision == EvaluationDecision.SELECT_EARLY_SIGNAL
+            and not draft.required_followups
+        ):
+            updates["required_followups"] = [
+                "Track official confirmation, conflicting evidence, or independent corroboration."
+            ]
+            metadata["repaired_missing_required_followups"] = True
+
+        if not updates:
+            return draft
+        return draft.model_copy(update={**updates, "metadata": metadata})
+
+    def _normalize_weak_frontier_signal(
+        self,
+        draft: EvaluationDraft,
+        cluster: EventCluster,
+    ) -> EvaluationDraft:
+        """Keep weak single-source community signals watchable but out of the main report."""
+
+        if draft.decision != EvaluationDecision.SELECT_EARLY_SIGNAL:
+            return draft
+        if cluster.category != CandidateCategory.EARLY_SIGNAL:
+            return draft
+        evidence_items = [
+            item
+            for evidence_id in cluster.evidence_ids
+            if (item := self.evidence.get(evidence_id)) is not None
+        ]
+        if not self._is_weak_single_source_community_signal(evidence_items):
+            return draft
+
+        required_followups = list(draft.required_followups) or [
+            "Seek a second independent source or official confirmation before promoting this signal into the main report."
+        ]
+        return draft.model_copy(
+            update={
+                "decision": EvaluationDecision.SHORT_WATCH,
+                "required_followups": required_followups,
+                "risk_flags": self._dedupe(
+                    [*draft.risk_flags, "weak_single_source_community_signal"]
+                ),
+                "metadata": {
+                    **draft.metadata,
+                    "normalized_decision_from": draft.decision.value,
+                    "normalized_decision_reason": "weak_single_source_community_signal",
+                },
+            }
+        )
+
+    @staticmethod
+    def _is_weak_single_source_community_signal(
+        evidence_items: list[EvidenceItem],
+    ) -> bool:
+        if len(evidence_items) != 1:
+            return False
+        evidence = evidence_items[0]
+        if evidence.source_type not in {
+            SourceType.HACKER_NEWS,
+            SourceType.REDDIT,
+            SourceType.X,
+            SourceType.BLUESKY,
+            SourceType.PRODUCT_HUNT,
+        }:
+            return False
+        if evidence.strength not in {EvidenceStrength.WEAK, EvidenceStrength.UNKNOWN}:
+            return False
+
+        metadata = evidence.metadata
+        engagement_pairs = (
+            ("score", 5),
+            ("comment_count", 2),
+            ("descendants", 2),
+            ("comments", 2),
+            ("upvotes", 10),
+            ("likes", 20),
+            ("reposts", 5),
+        )
+        for key, threshold in engagement_pairs:
+            value = metadata.get(key)
+            try:
+                numeric = int(value)
+            except (TypeError, ValueError):
+                continue
+            if numeric >= threshold:
+                return False
+        return True
 
     @staticmethod
     def _calibrate_write_policy(draft: EvaluationDraft) -> WritePolicy:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -23,6 +24,7 @@ from app.domain import (
     AgentRole,
     CandidateCategory,
     DailyReport,
+    EvidenceItem,
     EvidenceMapEntry,
     EventCluster,
     ObjectType,
@@ -325,6 +327,7 @@ class WritingOutputMaterializer:
         )
         sections = self._normalize_report_sections(raw_sections)
         evidence_map = self._evidence_map_for_sections(run.id, sections)
+        evidence_by_id = self._evidence_by_id_for_map(run.id, evidence_map)
         trace_timeline_ids = [event.id for event in self.context.runs.get_full_state(run.id).trace_events]
         metadata = {
             **(existing.metadata if existing is not None else {}),
@@ -353,6 +356,7 @@ class WritingOutputMaterializer:
             watchlist_updates=watchlist_updates,
             overview_judgments=draft.overview_judgments,
             tomorrow_focus=tomorrow_focus,
+            evidence_by_id=evidence_by_id,
         )
         now = utc_now()
         return DailyReport(
@@ -426,6 +430,7 @@ class WritingOutputMaterializer:
                 ].append(item)
 
         normalized: list[ReportSection] = []
+        required_body_sections = {"early_signals", "confirmed_events", "tech_finance"}
         for section_id, title in (
             ("early_signals", "前沿爆料 Early Signals"),
             ("confirmed_events", "重大事件确认 Confirmed Events"),
@@ -434,7 +439,7 @@ class WritingOutputMaterializer:
             ("other", "Other Signals"),
         ):
             items = items_by_section[section_id]
-            if items:
+            if items or section_id in required_body_sections:
                 normalized.append(
                     ReportSection(section_id=section_id, title=title, items=items)
                 )
@@ -469,6 +474,8 @@ class WritingOutputMaterializer:
         self._validate_item_lineage(run_id, draft)
         draft = self._repair_tech_finance_fields_from_clusters(run_id, draft)
         draft = self._repair_uncertain_item_language(draft)
+        draft = self._repair_status_label_language(draft)
+        draft = self._sanitize_report_item_tickers(draft)
         draft = self._repair_missing_followups(draft)
         draft = self._repair_generic_followups(draft)
         draft = self._normalize_report_item_text(draft)
@@ -502,13 +509,13 @@ class WritingOutputMaterializer:
         if draft.followup_points:
             return draft
         if draft.category in {CandidateCategory.CONFIRMED_EVENT, CandidateCategory.OFFICIAL_UPDATE}:
-            followup = "No immediate follow-up required; revisit if new official details appear."
+            followup = "暂无必须追踪动作；若官方补充技术细节、价格或发布时间表，再重新评估影响。"
         elif draft.category == CandidateCategory.TECH_FINANCE:
-            followup = "Check the next official filing, earnings call, or market reaction update."
+            followup = "继续查看后续 SEC 文件、财报电话会、公司 IR 更新和市场反应。"
         elif draft.category == CandidateCategory.WATCHLIST_UPDATE:
-            followup = "Review this watchlist item on its next scheduled check date."
+            followup = "在下一次计划检查日复核这条 Watchlist 线索是否需要延期或归档。"
         else:
-            followup = "Track peer review, replication, source updates, or official confirmation."
+            followup = "继续追踪同行验证、复现实验、来源更新或官方确认。"
         return draft.model_copy(
             update={
                 "followup_points": [followup],
@@ -542,14 +549,13 @@ class WritingOutputMaterializer:
                 any_repaired = True
                 if draft.tickers:
                     improved.append(
-                        f"Monitor {', '.join(draft.tickers)} official filings, "
-                        f"earnings calls, and product announcements for confirmation."
+                        f"继续监测 {', '.join(draft.tickers)} 的官方文件、财报电话会和产品公告，"
+                        "确认这条线索是否进入公司层面的事实披露。"
                     )
                 else:
-                    short_title = draft.title[:60] if draft.title else "this topic"
+                    short_title = draft.title[:60] if draft.title else "这条线索"
                     improved.append(
-                        f"Track {short_title} via official sources, peer "
-                        f"publications, or corroborating community signals."
+                        f"围绕「{short_title}」继续查找官方来源、论文/复现结果或独立社区信号。"
                     )
             else:
                 improved.append(point)
@@ -585,7 +591,10 @@ class WritingOutputMaterializer:
     def _clean_report_text(text: str | None) -> str | None:
         if text is None:
             return None
-        return text.replace("🤗", "Hugging Face")
+        cleaned = text.replace("🤗", "Hugging Face")
+        cleaned = re.sub(r"\b(?:watch|cl|ev|cand|eval|trace)_[A-Za-z0-9_:-]+\b", "", cleaned)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned)
+        return cleaned.strip()
 
     def _repair_uncertain_item_language(self, draft: ReportItemDraft) -> ReportItemDraft:
         if draft.category not in {
@@ -594,63 +603,84 @@ class WritingOutputMaterializer:
         }:
             return draft
 
+        is_research = draft.category == CandidateCategory.RESEARCH
+
         status_label = draft.status_label
         if (
             not self._has_uncertainty_marker(status_label)
             and not self._has_strong_fact_marker(status_label)
         ):
-            status_label = f"Preliminary / unconfirmed: {status_label}"
+            prefix = "预印本 / 未确认" if is_research else "未确认来源信号"
+            status_label = f"{prefix}: {status_label}"
 
         core_information = draft.core_information
 
         why_it_matters = draft.why_it_matters
         if not self._has_uncertainty_marker(why_it_matters):
             why_it_matters = (
-                f"{why_it_matters} Treat this as a preliminary signal until peer "
-                "review, replication, or official confirmation appears."
+                f"{why_it_matters} 在出现同行评审、独立复现或官方确认前，"
+                "这只能作为早期信号处理。"
             )
 
         potential_impact = draft.potential_impact
         if potential_impact:
+            uncertainty_scope = (
+                "预印本，尚未验证"
+                if is_research
+                else "单一来源，尚未确认"
+            )
             potential_impact = potential_impact.replace(
                 "Medium to High",
-                "Low to Medium (preprint, unvalidated)",
+                f"低到中等（{uncertainty_scope}）",
             )
             potential_impact = potential_impact.replace(
                 "Medium-to-high",
-                "Low to Medium (preprint, unvalidated)",
+                f"低到中等（{uncertainty_scope}）",
             )
             potential_impact = potential_impact.replace(
                 "medium to high",
-                "low to medium (preprint, unvalidated)",
+                f"低到中等（{uncertainty_scope}）",
             )
             potential_impact = potential_impact.replace(
                 "medium-to-high",
-                "low to medium (preprint, unvalidated)",
+                f"低到中等（{uncertainty_scope}）",
             )
             if not self._has_uncertainty_marker(potential_impact):
                 potential_impact = (
-                    "Potential impact if independently validated: "
+                    "若后续被交叉验证，潜在影响："
                     f"{potential_impact}"
                 )
-            elif "preprint" not in potential_impact.lower():
-                potential_impact = f"Preprint-stage impact: {potential_impact}"
+            elif (
+                is_research
+                and "preprint" not in potential_impact.lower()
+                and "预印本" not in potential_impact
+            ):
+                potential_impact = f"预印本阶段影响：{potential_impact}"
+            potential_impact = self._clean_uncertainty_prefixes(potential_impact)
 
-        key_data = [self._hedge_uncertain_key_data(item) for item in draft.key_data]
+        key_data = [
+            self._hedge_uncertain_key_data(item, category=draft.category)
+            for item in draft.key_data
+        ]
+        default_followup = (
+            "继续追踪同行评审状态、独立复现和实现细节。"
+            if is_research
+            else (
+                "在提升为正式事项前，继续寻找独立来源、代码制品或官方公告进行交叉验证。"
+            )
+        )
         followup_points = self._dedupe(
             draft.followup_points
-            + [
-                (
-                    "Track peer review status, independent replication, and "
-                    "implementation details."
-                )
-            ]
+            + [default_followup]
         )
         uncertainty_label = draft.uncertainty_label
         if not uncertainty_label or not self._has_uncertainty_marker(uncertainty_label):
             uncertainty_label = (
-                "Preliminary / unconfirmed; requires peer review, replication, "
-                "or official confirmation."
+                "预印本 / 未确认；需要同行评审、复现或官方确认。"
+                if is_research
+                else (
+                    "未确认来源信号；需要独立交叉验证或官方确认。"
+                )
             )
 
         return draft.model_copy(
@@ -665,6 +695,64 @@ class WritingOutputMaterializer:
                 "metadata": {
                     **draft.metadata,
                     "repaired_uncertain_item_language": True,
+                },
+            }
+        )
+
+    @staticmethod
+    def _repair_status_label_language(draft: ReportItemDraft) -> ReportItemDraft:
+        status_label = draft.status_label.strip()
+        category_values = {category.value for category in CandidateCategory}
+        for separator in (":", "："):
+            if separator not in status_label:
+                continue
+            prefix, suffix = status_label.rsplit(separator, 1)
+            if suffix.strip().lower() in category_values:
+                status_label = prefix.strip()
+
+        normalized = status_label.lower().strip()
+        if normalized in {"confirmed", "confirmed_event", "official_update"}:
+            status_label = "已确认"
+        elif normalized in {"early_signal", "unconfirmed source signal"}:
+            status_label = "未确认来源信号"
+        elif normalized in {"research", "preprint / unconfirmed"}:
+            status_label = "预印本 / 未确认"
+        elif draft.category == CandidateCategory.WATCHLIST_UPDATE:
+            status_label = WritingOutputMaterializer._human_watch_status(status_label)
+
+        if status_label == draft.status_label:
+            return draft
+        return draft.model_copy(update={"status_label": status_label})
+
+    @staticmethod
+    def _sanitize_report_item_tickers(draft: ReportItemDraft) -> ReportItemDraft:
+        invalid_tickers = {
+            "ANTH",
+            "CEREBRAS",
+            "DEEPSEEK",
+            "HF",
+            "HUGGINGFACE",
+            "MISTRAL",
+            "OPENAI",
+            "XAI",
+        }
+        tickers = [
+            ticker
+            for ticker in draft.tickers
+            if ticker.upper() not in invalid_tickers
+        ]
+        if tickers == draft.tickers:
+            return draft
+        return draft.model_copy(
+            update={
+                "tickers": tickers,
+                "metadata": {
+                    **draft.metadata,
+                    "removed_invalid_tickers": [
+                        ticker
+                        for ticker in draft.tickers
+                        if ticker.upper() in invalid_tickers
+                    ],
                 },
             }
         )
@@ -688,6 +776,21 @@ class WritingOutputMaterializer:
                 "suggest",
                 "claim",
                 "unvalidated",
+                "corroborated",
+                "corroboration",
+                "source signal",
+                "single-source",
+                "预印本",
+                "初步",
+                "早期信号",
+                "未确认",
+                "尚未确认",
+                "未验证",
+                "单一来源",
+                "交叉验证",
+                "官方确认",
+                "同行评审",
+                "复现",
             }
         )
 
@@ -709,11 +812,42 @@ class WritingOutputMaterializer:
         )
 
     @staticmethod
-    def _hedge_uncertain_key_data(item: str) -> str:
+    def _hedge_uncertain_key_data(
+        item: str,
+        *,
+        category: CandidateCategory,
+    ) -> str:
         normalized = item.lower()
-        if "preprint claim" in normalized or "unvalidated" in normalized:
+        if (
+            "preprint claim" in normalized
+            or "signal detail" in normalized
+            or "unvalidated" in normalized
+            or "unconfirmed" in normalized
+            or "预印本声明" in normalized
+            or "信号细节" in normalized
+            or "未验证" in normalized
+            or "未确认" in normalized
+        ):
             return item
-        return f"Preprint claim (unvalidated): {item}"
+        if category == CandidateCategory.RESEARCH:
+            return f"预印本声明（未验证）：{item}"
+        return f"信号细节（未确认）：{item}"
+
+    @staticmethod
+    def _clean_uncertainty_prefixes(text: str) -> str:
+        replacements = {
+            "预印本阶段影响：预印本阶段影响：": "预印本阶段影响：",
+            "若后续被交叉验证，潜在影响：若后续被交叉验证，潜在影响：": "若后续被交叉验证，潜在影响：",
+        }
+        cleaned = text
+        changed = True
+        while changed:
+            changed = False
+            for source, target in replacements.items():
+                if source in cleaned:
+                    cleaned = cleaned.replace(source, target)
+                    changed = True
+        return cleaned
 
     def _repair_tech_finance_fields_from_clusters(
         self,
@@ -727,10 +861,11 @@ class WritingOutputMaterializer:
         for cluster_id in draft.cluster_ids:
             try:
                 clusters.append(self.clusters.require(cluster_id))
-            except Exception:
-                self.trace_service.record_event(
+            except LookupError:
+                self.context.trace_service.record_event(
                     run_id=run_id,
                     phase=RunPhase.WRITING,
+                    agent_role=AgentRole.WRITER,
                     event_type=TraceEventType.ARTIFACT_STORED,
                     summary=f"Writer referenced unknown cluster {cluster_id}; skipping.",
                     metadata={"cluster_id": cluster_id, "repair": "tech_finance_fields"},
@@ -762,26 +897,122 @@ class WritingOutputMaterializer:
             )
             if impact_source:
                 potential_impact = (
-                    "Tech-finance impact requires follow-up; cited cluster states: "
+                    "科技金融影响仍需后续验证；当前引用的事件簇信息为："
                     f"{impact_source}"
                 )
 
-        if potential_impact and "impact chain" not in potential_impact.lower():
+        if (
+            potential_impact
+            and "impact chain" not in potential_impact.lower()
+            and "影响链条" not in potential_impact
+        ):
             potential_impact = (
-                f"{potential_impact} Impact chain: filing contents or company data "
-                "change investor expectations, which can move the related ticker, "
-                "AI hardware supply-chain sentiment, and AI infrastructure capex assumptions."
+                f"{potential_impact} 影响链条：SEC 文件内容或公司经营数据会改变投资者预期，"
+                "进而影响相关 ticker、AI 硬件供应链情绪和 AI 基础设施 capex 假设。"
             )
 
-        if tickers != draft.tickers or potential_impact != draft.potential_impact:
+        key_data, followup_points, sec_metadata_only = (
+            self._repair_sec_finance_details_from_evidence(
+                run_id=run_id,
+                clusters=run_clusters,
+                draft=draft,
+            )
+        )
+        if sec_metadata_only:
+            metadata["sec_metadata_only_needs_followup"] = True
+            potential_impact = self._metadata_only_finance_impact(tickers or inherited_tickers)
+
+        if (
+            tickers != draft.tickers
+            or potential_impact != draft.potential_impact
+            or key_data != draft.key_data
+            or followup_points != draft.followup_points
+        ):
             return draft.model_copy(
                 update={
                     "tickers": tickers,
                     "potential_impact": potential_impact,
+                    "key_data": key_data,
+                    "followup_points": followup_points,
                     "metadata": metadata,
                 }
-            )
+        )
         return draft
+
+    @staticmethod
+    def _metadata_only_finance_impact(tickers: list[str]) -> str:
+        ticker_text = ", ".join(tickers) if tickers else "相关公司"
+        return (
+            f"当前只能确认 {ticker_text} 相关 SEC 文件存在，尚不能据此判断收入 beat/miss、"
+            "capex 方向或股价涨跌幅。影响链条：先提取 SEC 正文和 XBRL/company facts 中的收入、"
+            "数据中心、capex 或 guidance 数据，再比较历史趋势和市场预期，最后才评估相关 ticker、"
+            "AI 硬件供应链情绪和 AI 基础设施 capex 假设。"
+        )
+
+    def _repair_sec_finance_details_from_evidence(
+        self,
+        *,
+        run_id: str,
+        clusters: list[EventCluster],
+        draft: ReportItemDraft,
+    ) -> tuple[list[str], list[str], bool]:
+        evidence_items = []
+        for evidence_id in self._dedupe(
+            [
+                evidence_id
+                for cluster in clusters
+                for evidence_id in cluster.evidence_ids
+            ]
+        ):
+            evidence = self.evidence.get(evidence_id)
+            if evidence is not None and evidence.run_id == run_id:
+                evidence_items.append(evidence)
+
+        sec_items = [
+            evidence
+            for evidence in evidence_items
+            if evidence.source_type.value == "sec_filing"
+        ]
+        if not sec_items:
+            return draft.key_data, draft.followup_points, False
+
+        content_items = [
+            evidence
+            for evidence in sec_items
+            if evidence.metadata.get("kind") in {"sec_filing_content", "sec_xbrl_fact"}
+        ]
+        metadata_only_items = [
+            evidence
+            for evidence in sec_items
+            if evidence.metadata.get("kind") == "sec_filing"
+        ]
+        key_data = list(draft.key_data)
+        for evidence in content_items[:3]:
+            if evidence.metadata.get("formatted_value"):
+                key_data.append(
+                    f"{evidence.title}: {evidence.metadata['formatted_value']}"
+                )
+            else:
+                key_data.append(evidence.snippet)
+        for evidence in metadata_only_items[:3]:
+            form = evidence.metadata.get("form")
+            filing_date = evidence.metadata.get("filing_date")
+            accession = evidence.metadata.get("accession_number")
+            key_data.append(
+                "已抓取 SEC 文件元数据："
+                f"{form or 'filing'}，日期 {filing_date or 'unknown date'}"
+                + (f"，accession {accession}" if accession else "")
+            )
+
+        sec_metadata_only = bool(metadata_only_items) and not content_items
+        followup_points = list(draft.followup_points)
+        if sec_metadata_only:
+            followup_points.append(
+                "下一步用 sec_filing_content 拉取该 accession 的正文，并用 sec_company_facts "
+                "核对收入、capex 或数据中心指标，再判断是否具备更强市场影响。"
+            )
+
+        return self._dedupe(key_data), self._dedupe(followup_points), sec_metadata_only
 
     def _normalize_item_category_from_clusters(
         self,
@@ -977,9 +1208,14 @@ class WritingOutputMaterializer:
                 WatchlistUpdate(
                     watchlist_id=item.id,
                     topic=item.topic,
-                    current_status=item.status.value,
-                    new_developments=[entry.summary for entry in item.history[-3:]],
-                    next_watch=item.open_questions or item.reactivation_rules,
+                    current_status=self._human_watch_status(item.status.value),
+                    new_developments=[
+                        self._human_watch_development(entry.summary)
+                        for entry in item.history[-3:]
+                    ],
+                    next_watch=self._human_watch_next_list(
+                        item.open_questions or item.reactivation_rules
+                    ),
                     evidence_ids=item.evidence_ids,
                 )
             )
@@ -1065,11 +1301,51 @@ class WritingOutputMaterializer:
         return {
             "watchlist_id": watchlist_id,
             "topic": topic,
-            "current_status": current_status,
-            "new_developments": new_developments,
-            "next_watch": next_watch,
+            "current_status": WritingOutputMaterializer._human_watch_status(
+                str(current_status)
+            ),
+            "new_developments": [
+                WritingOutputMaterializer._human_watch_development(item)
+                for item in new_developments
+            ],
+            "next_watch": WritingOutputMaterializer._human_watch_next_list(next_watch),
             "evidence_ids": evidence_ids,
         }
+
+    @staticmethod
+    def _human_watch_status(status: str) -> str:
+        if WritingOutputMaterializer._contains_cjk(status):
+            return status
+        normalized = status.strip().lower()
+        mapping = {
+            "active": "短期追踪中",
+            "reactivated": "已重新激活追踪",
+            "archived": "已归档",
+            "expired": "已到期",
+            "paused": "暂停追踪",
+        }
+        return mapping.get(normalized, f"追踪状态：{status}")
+
+    @staticmethod
+    def _human_watch_development(text: str) -> str:
+        if WritingOutputMaterializer._contains_cjk(text):
+            return text
+        normalized = text.strip().lower()
+        if normalized == "watchlist tracking item created or refreshed.":
+            return "已创建或刷新 Watchlist 追踪项。"
+        if not text.strip():
+            return "今日无新增。"
+        return f"今日进展待核验：{text}"
+
+    @staticmethod
+    def _human_watch_next_list(items: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for item in items:
+            if WritingOutputMaterializer._contains_cjk(item):
+                normalized.append(item)
+            elif item.strip():
+                normalized.append(f"继续核验：{item}")
+        return normalized
 
     @staticmethod
     def _string_list(value) -> list[str]:
@@ -1123,7 +1399,7 @@ class WritingOutputMaterializer:
             )
         if decision == ReviewDecision.REVISE and not (issue_drafts or required_changes):
             decision = ReviewDecision.PASS
-        guard_issues = self._early_signal_fact_issues(report)
+        guard_issues = self._deterministic_report_quality_issues(report)
         if decision == ReviewDecision.PASS and guard_issues:
             decision = ReviewDecision.REVISE
             issue_drafts.extend(guard_issues)
@@ -1421,6 +1697,89 @@ class WritingOutputMaterializer:
                     )
         return issues
 
+    def _deterministic_report_quality_issues(self, report: DailyReport) -> list[ReviewIssueDraft]:
+        return [
+            *self._early_signal_fact_issues(report),
+            *self._human_language_issues(report),
+            *self._system_language_issues(report),
+        ]
+
+    def _human_language_issues(self, report: DailyReport) -> list[ReviewIssueDraft]:
+        missing_fields: dict[str, list[str]] = {}
+        for section in report.sections:
+            for item in section.items:
+                if item.category == CandidateCategory.WATCHLIST_UPDATE:
+                    continue
+                item_missing: list[str] = []
+                if not self._contains_cjk(item.core_information):
+                    item_missing.append("core_information")
+                if not self._contains_cjk(item.why_it_matters):
+                    item_missing.append("why_it_matters")
+                if item.potential_impact and not self._contains_cjk(item.potential_impact):
+                    item_missing.append("potential_impact")
+                if item.followup_points and not any(
+                    self._contains_cjk(point) for point in item.followup_points
+                ):
+                    item_missing.append("followup_points")
+                if item_missing:
+                    missing_fields[item.item_id] = item_missing
+
+        if not missing_fields:
+            return []
+        return [
+            ReviewIssueDraft(
+                priority=1,
+                title="Human report body is not written in Chinese",
+                body=(
+                    "Human-facing narrative fields must be written in Simplified Chinese. "
+                    "Keep English proper nouns, model names, paper titles, URLs, APIs, and tickers, "
+                    "but rewrite explanatory body copy in Chinese."
+                ),
+                metadata={
+                    "deterministic_guard": "human_report_language",
+                    "item_fields": missing_fields,
+                },
+            )
+        ]
+
+    @staticmethod
+    def _system_language_issues(report: DailyReport) -> list[ReviewIssueDraft]:
+        text = report.full_markdown or ""
+        normalized = text.lower()
+        blocked_markers = {
+            "warning:",
+            "source diversity",
+            "来源多样性",
+            "来源类型",
+            "single-source justification",
+            "write_policy",
+            "selected_cluster",
+            "evidence_map",
+            "trace_timeline",
+            "no cross-source validation",
+        }
+        has_internal_id = re.search(
+            r"\b(?:watch|cl|ev|cand|eval|trace)_[A-Za-z0-9_:-]+\b",
+            text,
+        )
+        if not any(marker in normalized for marker in blocked_markers) and not has_internal_id:
+            return []
+        return [
+            ReviewIssueDraft(
+                priority=1,
+                title="Human Markdown contains system or internal debug language",
+                body=(
+                    "Human-facing Markdown must not expose source-diversity gate text, "
+                    "trace/evidence/cluster IDs, write policy labels, or warning/debug language."
+                ),
+                metadata={"deterministic_guard": "human_markdown_system_language"},
+            )
+        ]
+
+    @staticmethod
+    def _contains_cjk(text: str) -> bool:
+        return bool(re.search(r"[\u3400-\u9fff]", text))
+
     @staticmethod
     def _contains_confirmed_fact_language(text: str) -> bool:
         import re
@@ -1613,12 +1972,11 @@ class WritingOutputMaterializer:
             "title": title,
             "report_date": run.report_date.isoformat(),
             "overview_judgments": overview_judgments,
-            "statistics": {
-                "section_count": len(sections),
-                "item_count": sum(len(section.items) for section in sections),
-                "watchlist_update_count": len(watchlist_updates),
-                "trace_event_count": len(trace_timeline_ids),
-            },
+            "statistics": WritingOutputMaterializer._report_statistics(
+                sections=sections,
+                watchlist_updates=watchlist_updates,
+                trace_timeline_ids=trace_timeline_ids,
+            ),
             "sections": [section.model_dump(mode="json") for section in sections],
             "evidence_map": [entry.model_dump(mode="json") for entry in evidence_map],
             "watchlist_updates": [update.model_dump(mode="json") for update in watchlist_updates],
@@ -1656,20 +2014,34 @@ class WritingOutputMaterializer:
         watchlist_updates: list[WatchlistUpdate],
         overview_judgments: list[str],
         tomorrow_focus: list[str],
+        evidence_by_id: dict[str, EvidenceItem],
     ) -> str:
+        body_item_count = sum(
+            len(section.items)
+            for section in sections
+            if section.section_id != "watchlist"
+        )
+        watchlist_item_count = sum(
+            len(section.items)
+            for section in sections
+            if section.section_id == "watchlist"
+        )
+        human_overview = WritingOutputMaterializer._human_overview_judgments(
+            overview_judgments
+        )
         lines = [
             f"# {title}",
             f"日期：{run.report_date.isoformat()}",
             "",
             "## 0. 今日总览",
         ]
-        if overview_judgments:
-            lines.extend(f"- {judgment}" for judgment in overview_judgments[:3])
+        if human_overview:
+            lines.extend(f"- {judgment}" for judgment in human_overview[:3])
         else:
-            lines.append("- 今日报告由 Connor.ai 写作循环生成。")
+            lines.append("- 今日入选信息已按爆料、确认事件和科技金融影响分桶整理。")
         lines.append(
-            f"- 今日信息结构统计：{sum(len(section.items) for section in sections)} 条入选信息，"
-            f"{len(watchlist_updates)} 条 Watchlist 更新。"
+            f"- 今日信息结构统计：正文 {body_item_count} 条，"
+            f"Watchlist {watchlist_item_count or len(watchlist_updates)} 条。"
         )
 
         next_index = 1
@@ -1680,10 +2052,15 @@ class WritingOutputMaterializer:
             next_index += 1
             lines.extend(["", f"## {index}. {section.title}"])
             if not section.items:
-                lines.append("- 今日无新增。")
+                lines.append(WritingOutputMaterializer._empty_section_message(section.section_id))
                 continue
             for item in section.items:
-                lines.extend(WritingOutputMaterializer._render_report_item(item))
+                lines.extend(
+                    WritingOutputMaterializer._render_report_item(
+                        item,
+                        evidence_by_id=evidence_by_id,
+                    )
+                )
 
         rendered_watchlist = False
         watchlist_section = next(
@@ -1695,7 +2072,12 @@ class WritingOutputMaterializer:
         if watchlist_section and watchlist_section.items:
             rendered_watchlist = True
             for item in watchlist_section.items:
-                lines.extend(WritingOutputMaterializer._render_report_item(item))
+                lines.extend(
+                    WritingOutputMaterializer._render_report_item(
+                        item,
+                        evidence_by_id=evidence_by_id,
+                    )
+                )
         elif watchlist_updates:
             rendered_watchlist = True
             for update in watchlist_updates:
@@ -1718,7 +2100,21 @@ class WritingOutputMaterializer:
         return "\n".join(lines).strip() + "\n"
 
     @staticmethod
-    def _render_report_item(item: ReportItem) -> list[str]:
+    def _empty_section_message(section_id: str) -> str:
+        if section_id == "early_signals":
+            return "- 今日没有达到写入门槛的前沿爆料；较弱信号保留在 trace 或 Watchlist 中继续观察。"
+        if section_id == "confirmed_events":
+            return "- 今日没有达到写入门槛的官方确认事件。"
+        if section_id == "tech_finance":
+            return "- 今日没有达到写入门槛的科技金融信息；Finance Scout 的弱信号会留在 trace 或后续 Watchlist 中复核。"
+        return "- 今日无新增。"
+
+    @staticmethod
+    def _render_report_item(
+        item: ReportItem,
+        *,
+        evidence_by_id: dict[str, EvidenceItem],
+    ) -> list[str]:
         lines = [
             f"### {item.title}",
             f"- 状态：{item.status_label}",
@@ -1733,9 +2129,112 @@ class WritingOutputMaterializer:
             lines.append(f"- 相关 ticker：{', '.join(item.tickers)}")
         if item.uncertainty_label:
             lines.append(f"- 不确定性：{item.uncertainty_label}")
+        sources = WritingOutputMaterializer._source_links(item, evidence_by_id)
+        if sources:
+            lines.append(f"- 来源：{'；'.join(sources)}")
         if item.followup_points:
             lines.append(f"- 后续追踪点：{'；'.join(item.followup_points)}")
         return lines
+
+    @staticmethod
+    def _report_statistics(
+        *,
+        sections: list[ReportSection],
+        watchlist_updates: list[WatchlistUpdate],
+        trace_timeline_ids: list[str],
+    ) -> dict[str, int]:
+        body_item_count = sum(
+            len(section.items)
+            for section in sections
+            if section.section_id != "watchlist"
+        )
+        watchlist_item_count = sum(
+            len(section.items)
+            for section in sections
+            if section.section_id == "watchlist"
+        )
+        return {
+            "section_count": len(sections),
+            "body_item_count": body_item_count,
+            "watchlist_item_count": watchlist_item_count,
+            "item_count": body_item_count + watchlist_item_count,
+            "watchlist_update_count": len(watchlist_updates),
+            "trace_event_count": len(trace_timeline_ids),
+        }
+
+    def _evidence_by_id_for_map(
+        self,
+        run_id: str,
+        evidence_map: list[EvidenceMapEntry],
+    ) -> dict[str, EvidenceItem]:
+        evidence_ids = self._dedupe(
+            [
+                evidence_id
+                for entry in evidence_map
+                for evidence_id in entry.evidence_ids
+            ]
+        )
+        evidence_by_id: dict[str, EvidenceItem] = {}
+        for evidence_id in evidence_ids:
+            evidence = self.evidence.get(evidence_id)
+            if evidence is not None and evidence.run_id == run_id:
+                evidence_by_id[evidence.id] = evidence
+        return evidence_by_id
+
+    @staticmethod
+    def _source_links(
+        item: ReportItem,
+        evidence_by_id: dict[str, EvidenceItem],
+    ) -> list[str]:
+        links: list[str] = []
+        for index, evidence_id in enumerate(item.evidence_ids[:3], start=1):
+            evidence = evidence_by_id.get(evidence_id)
+            if evidence is None:
+                continue
+            label = WritingOutputMaterializer._markdown_link_label(
+                evidence.title or evidence.source_name or f"Source {index}"
+            )
+            if evidence.url:
+                links.append(f"[{label}]({evidence.url})")
+            else:
+                links.append(label)
+        return links
+
+    @staticmethod
+    def _markdown_link_label(text: str) -> str:
+        cleaned = WritingOutputMaterializer._clean_report_text(text) or "Source"
+        return cleaned.replace("[", "(").replace("]", ")")[:90]
+
+    @staticmethod
+    def _human_overview_judgments(overview_judgments: list[str]) -> list[str]:
+        blocked_markers = {
+            "source diversity",
+            "source type available",
+            "source type",
+            "来源多样性",
+            "来源类型",
+            "不同来源",
+            "single-source justification",
+            "justification:",
+            "distinct source types",
+            "write_policy",
+            "required bucket",
+            "selected cluster",
+            "evidence_map",
+            "trace_timeline",
+            "no single-source justification",
+            "no cross-source validation",
+            "warning:",
+        }
+        human: list[str] = []
+        for judgment in overview_judgments:
+            normalized = judgment.lower()
+            if any(marker in normalized for marker in blocked_markers):
+                continue
+            cleaned = WritingOutputMaterializer._clean_report_text(judgment)
+            if cleaned:
+                human.append(cleaned)
+        return human
 
     @staticmethod
     def _dedupe(values: list[str]) -> list[str]:

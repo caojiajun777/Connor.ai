@@ -79,7 +79,7 @@ class DailyRunHarness:
             input_payload=run.model_dump(mode="json"),
             metadata={"harness": True},
         )
-        self.context.session.flush()
+        self.context.checkpoint()
         return run
 
     def run(

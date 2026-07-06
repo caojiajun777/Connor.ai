@@ -446,28 +446,28 @@ def daily_report_fixture() -> DailyReport:
         category=CandidateCategory.EARLY_SIGNAL,
         status_label="Unconfirmed gray rollout feedback",
         core_information=(
-            "Community discussion and third-party code suggest a possible new reasoning-control option."
+            "社区讨论和第三方代码显示，OpenAI 可能正在测试新的 reasoning-control API 选项。"
         ),
-        why_it_matters="It may affect how developers tune cost, latency, and reasoning depth.",
-        potential_impact="If confirmed, agent frameworks may expose finer reasoning controls.",
+        why_it_matters="这会影响开发者如何在成本、延迟和推理深度之间做权衡。",
+        potential_impact="如果后续被确认，agent 框架可能会暴露更细的 reasoning 控制能力。",
         evidence_ids=[item.id for item in early_evidence],
         cluster_ids=[early_cluster.id],
-        followup_points=["Check official docs and first-party SDK commits."],
-        uncertainty_label="low confidence, high trackability",
+        followup_points=["检查官方文档和第一方 SDK commit 是否出现同名参数。"],
+        uncertainty_label="低置信度，但可追踪性较高。",
     )
     finance_item = ReportItem(
         item_id="item_nvda_hbm",
         title="NVIDIA AI demand keeps HBM and packaging in focus",
         category=CandidateCategory.TECH_FINANCE,
         status_label="Investor-relations sourced signal",
-        core_information="NVIDIA data-center commentary points to ongoing supply-chain pressure.",
-        why_it_matters="AI server revenue timing depends on HBM and advanced packaging capacity.",
-        potential_impact="Relevant for NVDA, TSM, HBM suppliers, and AI server vendors.",
-        key_data=["Data-center demand commentary", "HBM and advanced packaging constraints"],
+        core_information="NVIDIA 数据中心相关表述指向 AI 服务器供应链仍有压力。",
+        why_it_matters="AI server 收入确认节奏取决于 HBM 和先进封装产能。",
+        potential_impact="相关影响可能传导到 NVDA、TSM、HBM 供应商和 AI server 厂商。",
+        key_data=["数据中心需求表述", "HBM 和先进封装约束"],
         tickers=["NVDA", "TSM"],
         evidence_ids=[item.id for item in finance_evidence],
         cluster_ids=[finance_cluster.id],
-        followup_points=["Watch capex guidance and supplier commentary."],
+        followup_points=["跟进 capex guidance 和供应商评论。"],
     )
     sections = [
         ReportSection(
@@ -490,8 +490,8 @@ def daily_report_fixture() -> DailyReport:
         full_json={
             "report_date": "2026-07-03",
             "tomorrow_focus": [
-                "Check official API docs and SDK commits.",
-                "Watch AI data-center capex and supplier commentary.",
+                "检查官方 API 文档和 SDK commit。",
+                "跟进 AI 数据中心 capex 和供应商评论。",
             ],
             "sections": [
                 {"section_id": "early_signals", "items": [early_item.model_dump(mode="json")]},
@@ -518,7 +518,7 @@ def daily_report_fixture() -> DailyReport:
                 watchlist_id="watch_openai_reasoning_api",
                 topic="OpenAI reasoning-control API changes",
                 current_status="active short watch",
-                new_developments=["Community and code signals appeared."],
+                new_developments=["社区和代码侧信号已经出现。"],
                 next_watch=["OpenAI API changelog", "OpenAI SDK commits"],
                 evidence_ids=early_item.evidence_ids,
             )

@@ -35,11 +35,11 @@ EVALUATOR_ROLES = {
 }
 
 ROLE_EXECUTION_LIMITS = {
-    AgentRole.SOCIAL_SCOUT: {"max_iters": 2, "max_tool_calls": 1},
-    AgentRole.CODE_MODEL_SCOUT: {"max_iters": 2, "max_tool_calls": 1},
-    AgentRole.RESEARCH_SCOUT: {"max_iters": 2, "max_tool_calls": 1},
-    AgentRole.OFFICIAL_SCOUT: {"max_iters": 2, "max_tool_calls": 1},
-    AgentRole.FINANCE_SCOUT: {"max_iters": 2, "max_tool_calls": 1},
+    AgentRole.SOCIAL_SCOUT: {"max_iters": 4, "max_tool_calls": 1},
+    AgentRole.CODE_MODEL_SCOUT: {"max_iters": 4, "max_tool_calls": 1},
+    AgentRole.RESEARCH_SCOUT: {"max_iters": 4, "max_tool_calls": 1},
+    AgentRole.OFFICIAL_SCOUT: {"max_iters": 4, "max_tool_calls": 1},
+    AgentRole.FINANCE_SCOUT: {"max_iters": 4, "max_tool_calls": 2},
     AgentRole.CLUSTERER: {"max_iters": 1, "max_tool_calls": 0},
     AgentRole.FRONTIER_EVALUATOR: {"max_iters": 1, "max_tool_calls": 0},
     AgentRole.EVENT_EVALUATOR: {"max_iters": 1, "max_tool_calls": 0},

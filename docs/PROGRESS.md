@@ -4,9 +4,9 @@ Last updated: 2026-07-06
 
 ## Current Status
 
-Project state: Phase 15B complete. Connor.ai now has evidence URL deduplication, calibrated evaluator write-policies, SEC filing content extraction, finance figure context enrichment, and report usefulness tuning. The system can produce business-calibrated daily intelligence reports.
+Project state: Phase 16B complete. Connor.ai now has a production-readiness pass over the real daily run path: checkpointed CLI runs, cleaner human Markdown, stronger deterministic report guards, Watchlist/Editor timeout resilience, and lower-noise runtime logs.
 
-Next phase work: Worker, queue, and Dashboard production layers (Phase 16).
+Next phase work: start production layers: worker/queue/scheduler, Docker Compose with PostgreSQL and Redis, Dashboard frontend, API auth, and deeper finance extraction.
 
 ## Phase Progress
 
@@ -28,6 +28,33 @@ Next phase work: Worker, queue, and Dashboard production layers (Phase 16).
 | 14 | Source Expansion | In progress | GitHub / Hugging Face, arXiv / OpenReview, official blog / API changelog, SEC / IR, and Hacker News source tools complete; Reddit / X social boundaries deferred until auth/policy boundaries are explicit. |
 | 15A | Report Quality and Selection Hardening | Complete | Collect gate enforces report-bucket coverage; writer context includes quality contract; finalization blocks missing selected clusters/buckets/tomorrow focus; smoke test passes. |
 | 15B | Business Quality Calibration | Complete | Evidence URL dedup, evaluator write-policy calibration, SEC filing content extraction, finance figure YoY context, report usefulness tuning (source diversity, impact chains, follow-up specificity). |
+| 16A | Daily Report Business Quality Calibration | Complete | Weak single-source Early Signals are watch-only; Finance Scout can run bounded SEC follow-up; official clusters split more precisely; human Markdown includes source links and hides internal IDs. |
+| 16B | Production Report Readiness | Complete | CLI runs checkpoint progress; report Markdown has fixed core sections, Chinese field-level guards, Watchlist localization, SEC metadata-only finance protection, invalid ticker filtering, and timeout fallbacks for Watchlist/Editor. |
+
+## Phase 16B Results
+
+Delivered:
+
+- `HarnessConfig.commit_checkpoints` and CLI production checkpointing so in-progress runs are visible to `python -m app.cli status`.
+- Reduced repository warning noise for mutable run/report/cluster/watchlist/thread upserts.
+- Scout ReAct limits tuned to 4 iterations while keeping tool-call budgets fixed.
+- Watchlist Agent timeout tolerance with trace recording and evaluation-memory fallback.
+- Deterministic Editor fallback that carries forward the latest evidence-bound draft when the editor model times out.
+- Field-level Chinese report guard for human-facing item body.
+- Fixed core report sections with explicit empty-state copy for Early Signals, Confirmed Events, and Tech-Finance.
+- Watchlist status/development localization and enum-like status-label cleanup.
+- Mixed unrelated official/community cluster splitting.
+- Repeated uncertainty-prefix cleanup after revision loops.
+- Invalid private-company pseudo ticker filtering, including `ANTH`.
+- Conservative SEC metadata-only finance impact rewrite to avoid unsupported beat/miss or stock-move claims.
+- New plan/worklog docs: `docs/plans/phase-16b-production-report-readiness.md` and `docs/worklogs/phase-16b-production-report-readiness.md`.
+
+Checks:
+
+- `python -m ruff check .`: passed.
+- `python -m pytest -q --ignore=tests\smoke`: 198 passed.
+- `git diff --check`: passed, with Git reporting a line-ending warning for `tests/harness/test_daily_run_harness.py`.
+- Real CLI run completed: `run_2026-07-05_e0541abd3b5042f3`, report `report_cccef7130cb2ff5d`, with 42 evidence items, 18 candidates, 12 clusters, 12 evaluations, 4 Watchlist items, 1 final report, and empty stderr.
 
 ## Phase 15B Results
 

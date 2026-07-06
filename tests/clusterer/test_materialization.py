@@ -182,6 +182,213 @@ def test_cluster_materializer_merges_existing_dedupe_key_and_preserves_conflict(
     assert persisted_run.cluster_ids == [clusters[0].id]
 
 
+def test_cluster_materializer_splits_overbroad_official_cluster(db_session) -> None:
+    run = run_state_fixture()
+    RunRepository(db_session).add(run)
+    evidence = [
+        EvidenceItem(
+            id="ev_anthropic_pricing",
+            run_id=RUN_ID,
+            source_type=SourceType.OFFICIAL_BLOG,
+            source_name="Anthropic Blog",
+            access_level=SourceAccessLevel.PUBLIC,
+            strength=EvidenceStrength.OFFICIAL,
+            url="https://example.com/anthropic-pricing",
+            title="Anthropic updates API pricing",
+            published_at=BASE_TIME,
+            retrieved_at=BASE_TIME,
+            snippet="Official pricing update for an API model.",
+            raw_hash="sha256:anthropic-pricing",
+            created_at=BASE_TIME,
+        ),
+        EvidenceItem(
+            id="ev_anthropic_benchmark",
+            run_id=RUN_ID,
+            source_type=SourceType.OFFICIAL_BLOG,
+            source_name="Anthropic Blog",
+            access_level=SourceAccessLevel.PUBLIC,
+            strength=EvidenceStrength.OFFICIAL,
+            url="https://example.com/anthropic-benchmark",
+            title="Anthropic publishes a benchmark report",
+            published_at=BASE_TIME,
+            retrieved_at=BASE_TIME,
+            snippet="Official benchmark report for model behavior.",
+            raw_hash="sha256:anthropic-benchmark",
+            created_at=BASE_TIME,
+        ),
+    ]
+    candidates = [
+        CandidateItem(
+            id="cand_anthropic_pricing",
+            run_id=RUN_ID,
+            category=CandidateCategory.OFFICIAL_UPDATE,
+            signal_status=SignalStatus.OFFICIAL_CONFIRMATION,
+            claim_summary="Anthropic officially updated API pricing.",
+            entities=["Anthropic"],
+            topics=["api", "pricing"],
+            evidence_ids=["ev_anthropic_pricing"],
+            uncertainty=ConfidenceLevel.HIGH,
+            evidence_strength=EvidenceStrength.OFFICIAL,
+            why_it_matters="Pricing changes affect production cost controls.",
+            potential_impact="Developers may need to update routing and budgets.",
+            created_by_agent=AgentRole.OFFICIAL_SCOUT,
+            created_at=BASE_TIME,
+        ),
+        CandidateItem(
+            id="cand_anthropic_benchmark",
+            run_id=RUN_ID,
+            category=CandidateCategory.OFFICIAL_UPDATE,
+            signal_status=SignalStatus.OFFICIAL_CONFIRMATION,
+            claim_summary="Anthropic officially published a benchmark report.",
+            entities=["Anthropic"],
+            topics=["benchmark", "model_report"],
+            evidence_ids=["ev_anthropic_benchmark"],
+            uncertainty=ConfidenceLevel.HIGH,
+            evidence_strength=EvidenceStrength.OFFICIAL,
+            why_it_matters="Benchmarks change model-selection expectations.",
+            potential_impact="Teams may revisit eval baselines and model routing.",
+            created_by_agent=AgentRole.OFFICIAL_SCOUT,
+            created_at=BASE_TIME,
+        ),
+    ]
+    EvidenceRepository(db_session).add_many(evidence)
+    for candidate in candidates:
+        CandidateRepository(db_session).add(candidate)
+
+    result = ClusterOutputMaterializer(HarnessContext(db_session)).materialize(
+        run=run,
+        phase=RunPhase.CLUSTERING,
+        agent_role=AgentRole.CLUSTERER,
+        result=_cluster_result(
+            ClusterDraft(
+                category=CandidateCategory.OFFICIAL_UPDATE,
+                title="Anthropic official updates",
+                canonical_claim="Anthropic published several official updates.",
+                candidate_ids=[candidate.id for candidate in candidates],
+                evidence_ids=[item.id for item in evidence],
+            )
+        ),
+        bootstrap_evaluations=False,
+    )
+
+    clusters = EventClusterRepository(db_session).list_by_run(RUN_ID)
+
+    assert len(result.cluster_ids) == 2
+    assert len(clusters) == 2
+    assert {cluster.candidate_ids[0] for cluster in clusters} == {
+        "cand_anthropic_pricing",
+        "cand_anthropic_benchmark",
+    }
+    assert all(cluster.metadata["split_overbroad_official_cluster"] is True for cluster in clusters)
+
+
+def test_cluster_materializer_splits_unrelated_mixed_confirmation_cluster(db_session) -> None:
+    run = run_state_fixture()
+    RunRepository(db_session).add(run)
+    evidence = [
+        EvidenceItem(
+            id="ev_hf_lerobot",
+            run_id=RUN_ID,
+            source_type=SourceType.OFFICIAL_BLOG,
+            source_name="Hugging Face Blog",
+            access_level=SourceAccessLevel.PUBLIC,
+            strength=EvidenceStrength.OFFICIAL,
+            url="https://huggingface.co/blog/lerobot-v06",
+            title="LeRobot v0.6.0 released",
+            published_at=BASE_TIME,
+            retrieved_at=BASE_TIME,
+            snippet="Hugging Face announces a LeRobot release.",
+            raw_hash="sha256:hf-lerobot",
+            created_at=BASE_TIME,
+        ),
+        EvidenceItem(
+            id="ev_hn_jj",
+            run_id=RUN_ID,
+            source_type=SourceType.HACKER_NEWS,
+            source_name="Hacker News",
+            access_level=SourceAccessLevel.PUBLIC,
+            strength=EvidenceStrength.MODERATE,
+            url="https://news.ycombinator.com/item?id=123",
+            title="Ask HN: Is anyone using Jujutsu version control exclusively?",
+            published_at=BASE_TIME,
+            retrieved_at=BASE_TIME,
+            snippet="Community discussion about Jujutsu version control.",
+            raw_hash="sha256:hn-jj",
+            created_at=BASE_TIME,
+        ),
+    ]
+    candidates = [
+        CandidateItem(
+            id="cand_hf_lerobot",
+            run_id=RUN_ID,
+            category=CandidateCategory.OFFICIAL_UPDATE,
+            signal_status=SignalStatus.OFFICIAL_CONFIRMATION,
+            claim_summary="Hugging Face officially announced LeRobot v0.6.0.",
+            entities=["Hugging Face", "LeRobot"],
+            topics=["robotics"],
+            evidence_ids=["ev_hf_lerobot"],
+            uncertainty=ConfidenceLevel.HIGH,
+            evidence_strength=EvidenceStrength.OFFICIAL,
+            why_it_matters="Official release changes robotics tooling expectations.",
+            potential_impact="Teams may revisit robot-data workflows.",
+            created_by_agent=AgentRole.OFFICIAL_SCOUT,
+            created_at=BASE_TIME,
+        ),
+        CandidateItem(
+            id="cand_hn_jj",
+            run_id=RUN_ID,
+            category=CandidateCategory.EARLY_SIGNAL,
+            signal_status=SignalStatus.COMMUNITY_RUMOR,
+            claim_summary="HN users are discussing exclusive Jujutsu version-control adoption.",
+            entities=["Jujutsu"],
+            topics=["version_control"],
+            evidence_ids=["ev_hn_jj"],
+            uncertainty=ConfidenceLevel.LOW,
+            evidence_strength=EvidenceStrength.MODERATE,
+            followup_questions=["Check whether tooling adoption grows beyond HN discussion."],
+            created_by_agent=AgentRole.SOCIAL_SCOUT,
+            created_at=BASE_TIME,
+        ),
+    ]
+    EvidenceRepository(db_session).add_many(evidence)
+    for candidate in candidates:
+        CandidateRepository(db_session).add(candidate)
+
+    result = ClusterOutputMaterializer(HarnessContext(db_session)).materialize(
+        run=run,
+        phase=RunPhase.CLUSTERING,
+        agent_role=AgentRole.CLUSTERER,
+        result=_cluster_result(
+            ClusterDraft(
+                category=CandidateCategory.EARLY_SIGNAL,
+                title="Community and official updates",
+                canonical_claim="Hugging Face, LeRobot, and Jujutsu all appeared in source updates.",
+                candidate_ids=[candidate.id for candidate in candidates],
+                evidence_ids=[item.id for item in evidence],
+                metadata={"confirmation_linked": True},
+            )
+        ),
+        bootstrap_evaluations=False,
+    )
+
+    clusters = EventClusterRepository(db_session).list_by_run(RUN_ID)
+
+    assert len(result.cluster_ids) == 2
+    assert len(clusters) == 2
+    assert {tuple(cluster.candidate_ids) for cluster in clusters} == {
+        ("cand_hf_lerobot",),
+        ("cand_hn_jj",),
+    }
+    assert {cluster.category for cluster in clusters} == {
+        CandidateCategory.OFFICIAL_UPDATE,
+        CandidateCategory.EARLY_SIGNAL,
+    }
+    assert all(
+        cluster.metadata["split_reason"] == "unrelated_mixed_confirmation_cluster"
+        for cluster in clusters
+    )
+
+
 def test_cluster_materializer_repairs_missing_candidate_id_from_evidence(db_session) -> None:
     run = run_state_fixture()
     RunRepository(db_session).add(run)

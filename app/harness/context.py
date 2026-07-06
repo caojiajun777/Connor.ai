@@ -39,8 +39,15 @@ class HarnessContext:
 
         updated = run.model_copy(update={"updated_at": utc_now()})
         self.runs.add(updated)
-        self.session.flush()
+        self.checkpoint()
         return updated
+
+    def checkpoint(self) -> None:
+        """Flush, and optionally commit, a durable harness checkpoint."""
+
+        self.session.flush()
+        if self.config.commit_checkpoints:
+            self.session.commit()
 
     def transition_run(
         self,
@@ -67,12 +74,12 @@ class HarnessContext:
             phase=phase,
             summary=summary,
         )
-        self.session.flush()
+        self.checkpoint()
         return next_run
 
     def complete_phase(self, *, run_id: str, phase: RunPhase, summary: str) -> None:
         self.trace_service.phase_completed(run_id=run_id, phase=phase, summary=summary)
-        self.session.flush()
+        self.checkpoint()
 
     def fail_run(
         self,
@@ -100,7 +107,7 @@ class HarnessContext:
             error=error_detail or error_summary,
             metadata={"harness": True},
         )
-        self.session.flush()
+        self.checkpoint()
         return failed
 
     def archive_snapshot(
@@ -133,5 +140,5 @@ class HarnessContext:
             },
             metadata={"snapshot_label": label, "artifact_id": artifact.id},
         )
-        self.session.flush()
+        self.checkpoint()
         return artifact

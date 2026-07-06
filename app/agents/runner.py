@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from types import UnionType
 from collections.abc import Callable
 from typing import Any, get_args, get_origin
@@ -17,10 +18,10 @@ from sqlalchemy.orm import Session
 
 from app.agents.agentscope_tools import AgentScopeToolBridge
 from app.agents.config import AgentRoleConfig
-from app.agents.outputs import ClustererOutput, ReviewerOutput, ScoutOutput, WriterOutput
+from app.agents.outputs import ClustererOutput, EditorOutput, ReviewerOutput, ScoutOutput, WriterOutput
 from app.agents.registry import AgentRoleRegistry
 from app.agents.schemas import AgentRunRequest, AgentRunResult, AgentScopeExecutionError
-from app.domain import CandidateCategory, EvidenceStrength, ReviewDecision, SignalStatus, TraceEventType, TraceStatus
+from app.domain import AgentRole, CandidateCategory, EvidenceStrength, ReviewDecision, SignalStatus, TraceEventType, TraceStatus
 from app.services import TraceService
 from app.tools import ToolExecutor, ToolRegistry
 
@@ -587,6 +588,18 @@ class AgentRunner:
                 "AgentScope produced malformed report JSON twice; harness rendered a "
                 "conservative report from selected clusters, evaluations, and evidence."
             )
+        elif config.output_model is EditorOutput:
+            editor_context = request.context.get("editor_context")
+            if not isinstance(editor_context, dict):
+                return None
+            payload = self._fallback_editor_payload(editor_context)
+            if payload is None:
+                return None
+            summary = "Editor used deterministic fallback after AgentScope JSON repair failed."
+            reasoning_summary = (
+                "AgentScope could not return a revised report; harness carried forward "
+                "the latest draft unchanged so final review and deterministic gates can decide."
+            )
         else:
             return None
 
@@ -616,7 +629,13 @@ class AgentRunner:
             entities = candidate.get("entities") if isinstance(candidate.get("entities"), list) else []
             tickers = candidate.get("tickers") if isinstance(candidate.get("tickers"), list) else []
             topics = candidate.get("topics") if isinstance(candidate.get("topics"), list) else []
-            key_label = str((tickers or entities or topics or ["misc"])[0]).lower()
+            key_label = AgentRunner._fallback_cluster_key(
+                category=category,
+                candidate=candidate,
+                entities=entities,
+                tickers=tickers,
+                topics=topics,
+            )
             grouped.setdefault((category, key_label), []).append(candidate)
 
         cluster_drafts: list[dict[str, Any]] = []
@@ -755,12 +774,12 @@ class AgentRunner:
             )
             followups = (required_followups or missing_evidence or ["Track source updates."])[:5]
             tomorrow_focus.extend(followups[:2])
-            overview.append(title)
+            overview.append(f"{title}：已入选今日情报，需要结合来源证据继续追踪。")
             item = {
                 "title": title[:180],
                 "category": category,
                 "status_label": AgentRunner._fallback_status_label(category, cluster),
-                "core_information": claim,
+                "core_information": f"结构化来源显示：{claim}",
                 "why_it_matters": AgentRunner._fallback_why_it_matters(cluster),
                 "potential_impact": AgentRunner._fallback_potential_impact(cluster),
                 "key_data": AgentRunner._fallback_key_data(cluster),
@@ -806,6 +825,42 @@ class AgentRunner:
         }
 
     @staticmethod
+    def _fallback_editor_payload(editor_context: dict[str, Any]) -> dict[str, Any] | None:
+        report = editor_context.get("report")
+        if not isinstance(report, dict):
+            return None
+        sections = report.get("sections")
+        if not isinstance(sections, list) or not any(
+            isinstance(section, dict) and section.get("items")
+            for section in sections
+        ):
+            return None
+        full_json = report.get("full_json") if isinstance(report.get("full_json"), dict) else {}
+        return {
+            "summary": "Deterministically carried forward latest report draft.",
+            "reasoning_summary": (
+                "Editor fallback preserved the latest evidence-bound report after the "
+                "editor model timed out or failed structured repair."
+            ),
+            "edited_report_ids": [],
+            "revised_report_drafts": [
+                {
+                    "report_id": report.get("id"),
+                    "title": report.get("title") or "Connor.ai Daily Intelligence",
+                    "sections": sections,
+                    "watchlist_updates": report.get("watchlist_updates") or [],
+                    "overview_judgments": full_json.get("overview_judgments") or [],
+                    "tomorrow_focus": full_json.get("tomorrow_focus") or [],
+                    "metadata": {
+                        "deterministic_fallback": True,
+                        "fallback_reason": "editor_timeout_or_repair_failure",
+                    },
+                }
+            ],
+            "metadata": {"deterministic_fallback": True},
+        }
+
+    @staticmethod
     def _fallback_report_bucket(category: str) -> str:
         if category in {
             CandidateCategory.CONFIRMED_EVENT.value,
@@ -815,6 +870,64 @@ class AgentRunner:
         if category == CandidateCategory.TECH_FINANCE.value:
             return "tech_finance"
         return "early_signals"
+
+    @staticmethod
+    def _fallback_cluster_key(
+        *,
+        category: str,
+        candidate: dict[str, Any],
+        entities: list[Any],
+        tickers: list[Any],
+        topics: list[Any],
+    ) -> str:
+        leading = str((tickers or entities or topics or ["misc"])[0]).lower()
+        if category not in {
+            CandidateCategory.CONFIRMED_EVENT.value,
+            CandidateCategory.OFFICIAL_UPDATE.value,
+        }:
+            return leading
+
+        evidence_titles = (
+            candidate.get("evidence_titles")
+            if isinstance(candidate.get("evidence_titles"), list)
+            else []
+        )
+        title_basis = " ".join(str(item) for item in evidence_titles[:2] if str(item).strip())
+        if not title_basis:
+            title_basis = str(candidate.get("claim_summary") or "")
+        signature = AgentRunner._topic_signature(title_basis)
+        return f"{leading}:{signature}" if signature else leading
+
+    @staticmethod
+    def _topic_signature(text: str) -> str:
+        normalized = re.sub(r"[^a-zA-Z0-9]+", " ", text).lower()
+        stopwords = {
+            "the",
+            "and",
+            "for",
+            "with",
+            "from",
+            "official",
+            "update",
+            "updates",
+            "blog",
+            "release",
+            "released",
+            "announces",
+            "announced",
+            "hugging",
+            "face",
+            "openai",
+            "google",
+            "github",
+            "ai",
+        }
+        tokens = [
+            token
+            for token in normalized.split()
+            if len(token) > 2 and token not in stopwords
+        ]
+        return "-".join(tokens[:5])
 
     @staticmethod
     def _fallback_section_title(bucket: str) -> str:
@@ -832,12 +945,12 @@ class AgentRunner:
             CandidateCategory.CONFIRMED_EVENT.value,
             CandidateCategory.OFFICIAL_UPDATE.value,
         }:
-            return "Confirmed; details may need follow-up"
+            return "已确认；部分细节仍需跟进"
         if category == CandidateCategory.TECH_FINANCE.value:
-            return "Tech-finance signal; verify extracted figures"
+            return "科技金融信号；需核验关键数字"
         if policy == "write_with_caveat":
-            return "Unconfirmed signal; write with caveat"
-        return "Unconfirmed signal"
+            return "未确认信号；需带保留意见"
+        return "未确认信号"
 
     @staticmethod
     def _fallback_why_it_matters(cluster: dict[str, Any]) -> str:
@@ -845,18 +958,18 @@ class AgentRunner:
         topics = cluster.get("topics")
         parts = []
         if isinstance(decisions, list) and decisions:
-            parts.append(f"Evaluator decisions: {', '.join(str(item) for item in decisions)}.")
+            parts.append(f"评估结果：{', '.join(str(item) for item in decisions)}。")
         if isinstance(topics, list) and topics:
-            parts.append(f"Relevant topics: {', '.join(str(item) for item in topics[:5])}.")
-        parts.append("Connor selected this cluster for daily intelligence coverage.")
+            parts.append(f"相关主题：{', '.join(str(item) for item in topics[:5])}。")
+        parts.append("这条信息有可追溯来源和明确后续检查点，因此值得进入日报。")
         return " ".join(parts)
 
     @staticmethod
     def _fallback_potential_impact(cluster: dict[str, Any]) -> str:
         tickers = cluster.get("tickers")
         if isinstance(tickers, list) and tickers:
-            return f"Potentially relevant to {', '.join(str(item) for item in tickers)}."
-        return "Potential impact depends on confirmation, adoption, or follow-up evidence."
+            return f"潜在影响对象包括 {', '.join(str(item) for item in tickers)}，需要结合后续证据判断强度。"
+        return "潜在影响取决于后续确认、采用情况或更多来源证据。"
 
     @staticmethod
     def _fallback_key_data(cluster: dict[str, Any]) -> list[str]:
@@ -967,6 +1080,7 @@ class AgentRunner:
                 "to produce the structured output. Put reasoning only in "
                 "reasoning_summary."
             )
+            output_rule = AgentRunner._with_language_rule(output_rule, config)
             payload = {
                 "task": request.task,
                 "context": request.context,
@@ -974,18 +1088,19 @@ class AgentRunner:
                 "output_rule": output_rule,
             }
         else:
+            tool_completion_rule = AgentRunner._tool_completion_rule(config)
             output_rule = (
                 "Return the final answer as a single JSON object matching "
                 "required_output_schema. Put reasoning only in reasoning_summary, "
                 "as a concise summary, never as hidden chain-of-thought. "
                 f"You may call at most {config.execution.max_tool_calls} tool(s). "
-                "After any successful tool returns evidence_ids, stop calling tools "
-                "and produce the final JSON. Copy evidence_ids exactly from tool "
+                f"{tool_completion_rule} Copy evidence_ids exactly from tool "
                 "results; never invent evidence_ids. If tools return no useful "
                 "evidence, return followup_queries and leave candidate_drafts empty."
             )
             if tool_policy:
                 output_rule = f"{output_rule} TOOL USE POLICY: {tool_policy}"
+            output_rule = AgentRunner._with_language_rule(output_rule, config)
             payload = {
                 "task": request.task,
                 "context": request.context,
@@ -997,6 +1112,38 @@ class AgentRunner:
         return UserMsg(
             name="connor_harness",
             content=json.dumps(payload, ensure_ascii=False, sort_keys=True),
+        )
+
+    @staticmethod
+    def _with_language_rule(output_rule: str, config: AgentRoleConfig) -> str:
+        if config.role in {AgentRole.WRITER, AgentRole.EDITOR}:
+            return (
+                f"{output_rule} LANGUAGE RULE: Write narrative report fields "
+                "in Simplified Chinese. Preserve English proper nouns, tickers, "
+                "URLs, model names, product names, API names, and paper titles."
+            )
+        if config.role == AgentRole.REVIEWER:
+            return (
+                f"{output_rule} LANGUAGE REVIEW RULE: Treat English narrative "
+                "body copy as a blocking issue unless it is only a proper noun, "
+                "ticker, URL, model name, product name, API name, or paper title."
+            )
+        return output_rule
+
+    @staticmethod
+    def _tool_completion_rule(config: AgentRoleConfig) -> str:
+        if config.role == AgentRole.FINANCE_SCOUT:
+            return (
+                "If the first successful SEC/IR tool returns only filing metadata, "
+                "you may make one follow-up call to sec_filing_content or "
+                "sec_company_facts for the same company before final JSON. After "
+                "that follow-up, or after any tool that returns concrete financial "
+                "figures, filing sections, or IR content, stop calling tools and "
+                "produce the final JSON. "
+            )
+        return (
+            "After any successful tool returns evidence_ids, stop calling tools "
+            "and produce the final JSON. "
         )
 
     @staticmethod

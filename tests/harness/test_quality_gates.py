@@ -13,6 +13,7 @@ from app.domain import (
     RunPhase,
     RunState,
     RunStatus,
+    WritePolicy,
 )
 from app.harness import CollectGateOutcome, HarnessConfig, QualityGateService, WritingGateOutcome
 from app.repositories import (
@@ -60,7 +61,9 @@ def test_collect_gate_requests_followup_when_no_selected_items(db_session) -> No
     )
     db_session.flush()
 
-    decision = QualityGateService().evaluate_collect(RunRepository(db_session).get_full_state(RUN_ID))
+    decision = QualityGateService(
+        HarnessConfig(min_selected_items=1, min_report_body_items=1)
+    ).evaluate_collect(RunRepository(db_session).get_full_state(RUN_ID))
 
     assert decision.outcome == CollectGateOutcome.FOLLOWUP_NOW
     assert decision.followup_queries == ["Check official API changelog."]
@@ -93,7 +96,9 @@ def test_collect_gate_allows_followup_when_collect_round_budget_is_exhausted(db_
     )
     db_session.flush()
 
-    decision = QualityGateService().evaluate_collect(RunRepository(db_session).get_full_state(RUN_ID))
+    decision = QualityGateService(
+        HarnessConfig(min_selected_items=1, min_report_body_items=1)
+    ).evaluate_collect(RunRepository(db_session).get_full_state(RUN_ID))
 
     assert decision.outcome == CollectGateOutcome.FOLLOWUP_NOW
     assert decision.followup_queries == ["Check model card upload history."]
@@ -137,6 +142,59 @@ def test_collect_gate_adds_required_report_bucket_coverage(db_session) -> None:
     ]
     assert decision.metrics["selected_confirmed_events_count"] == 1
     assert decision.metrics["selected_tech_finance_count"] == 1
+
+
+def test_collect_gate_does_not_promote_context_only_short_watch_for_bucket_coverage(db_session) -> None:
+    run = run_state_fixture().model_copy(
+        update={
+            "loop_counters": run_state_fixture().loop_counters.model_copy(
+                update={"collect_rounds": 1}
+            )
+        }
+    )
+    RunRepository(db_session).add(run)
+    early = _bundle_with_evaluation(
+        early_signal_bundle(),
+        decision=EvaluationDecision.SHORT_WATCH,
+        required_followups=["Find a second source."],
+        write_policy=WritePolicy.CONTEXT_ONLY,
+    )
+    official = confirmed_event_bundle()
+    for bundle in [early, official]:
+        _persist_bundle(db_session, bundle)
+    db_session.flush()
+
+    decision = QualityGateService(
+        HarnessConfig(min_selected_items=1, min_report_body_items=1)
+    ).evaluate_collect(RunRepository(db_session).get_full_state(RUN_ID))
+
+    assert decision.outcome == CollectGateOutcome.ENTER_WRITING
+    assert decision.selected_cluster_ids == ["cl_anthropic_api_update"]
+    assert decision.metadata["coverage_added_cluster_ids"] == []
+    assert decision.metrics["selected_early_signals_count"] == 0
+
+
+def test_collect_gate_continues_when_body_breadth_below_production_threshold(db_session) -> None:
+    base_run = run_state_fixture()
+    run = base_run.model_copy(
+        update={
+            "loop_counters": base_run.loop_counters.model_copy(
+                update={"collect_rounds": 1}
+            ),
+            "budgets": RunBudgets(max_collect_rounds=2),
+        }
+    )
+    RunRepository(db_session).add(run)
+    _persist_bundle(db_session, confirmed_event_bundle())
+    db_session.flush()
+
+    decision = QualityGateService(
+        HarnessConfig(min_selected_items=1, min_report_body_items=2)
+    ).evaluate_collect(RunRepository(db_session).get_full_state(RUN_ID))
+
+    assert decision.outcome == CollectGateOutcome.CONTINUE_COLLECTING
+    assert decision.selected_cluster_ids == ["cl_anthropic_api_update"]
+    assert "insufficient_report_body_breadth" in decision.risk_flags
 
 
 def test_collect_gate_pauses_when_budget_exhausted_without_selection(db_session) -> None:
@@ -184,6 +242,52 @@ def test_writing_gate_finalizes_only_after_pass_review(db_session) -> None:
 
     assert decision.outcome == WritingGateOutcome.FINALIZE
     assert decision.report_id == report.id
+
+
+def test_writing_gate_blocks_single_body_item_in_production_mode(db_session) -> None:
+    run = run_state_fixture().model_copy(update={"phase": RunPhase.REVIEWING})
+    RunRepository(db_session).add(run)
+    base_report = daily_report_fixture()
+    body_section = base_report.sections[0]
+    body_item = body_section.items[0]
+    report = base_report.model_copy(
+        update={
+            "status": ReportStatus.DRAFT,
+            "sections": [body_section.model_copy(update={"items": [body_item]})],
+            "evidence_map": [
+                entry
+                for entry in base_report.evidence_map
+                if entry.report_item_id == body_item.item_id
+            ],
+            "full_json": {
+                **base_report.full_json,
+                "sections": [
+                    body_section.model_copy(update={"items": [body_item]}).model_dump(mode="json")
+                ],
+            },
+        }
+    )
+    DailyReportRepository(db_session).add(report)
+    from app.repositories import ReviewResultRepository
+
+    ReviewResultRepository(db_session).add(
+        ReviewResult(
+            id="review_pass_one_item",
+            run_id=RUN_ID,
+            report_id=report.id,
+            decision=ReviewDecision.PASS,
+            reasoning_summary="Report passes.",
+            created_at=BASE_TIME,
+        )
+    )
+    db_session.flush()
+
+    decision = QualityGateService(
+        HarnessConfig(min_selected_items=1, min_report_body_items=2)
+    ).evaluate_writing(RunRepository(db_session).get_full_state(RUN_ID))
+
+    assert decision.outcome == WritingGateOutcome.NEEDS_MANUAL_REVIEW
+    assert "insufficient_report_body_items:1/2" in decision.risk_flags
 
 
 def test_writing_gate_blocks_pass_when_selected_cluster_is_missing(db_session) -> None:
@@ -371,12 +475,14 @@ def _bundle_with_evaluation(
     *,
     decision: EvaluationDecision,
     required_followups: list[str],
+    write_policy: WritePolicy | None = None,
 ) -> dict[str, object]:
     evaluation = bundle["evaluation"].model_copy(
         update={
             "decision": decision,
             "required_followups": required_followups,
             "missing_evidence": required_followups,
+            "write_policy": write_policy,
         }
     )
     if evaluation.evaluator_type == EvaluationType.MARKET:

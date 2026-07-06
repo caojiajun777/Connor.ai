@@ -134,9 +134,16 @@ class WritingTaskFactory:
             ),
             "followup_specificity_rule": (
                 "Follow-up points must reference specific entities, products, or "
-                "metrics. Avoid generic placeholders like 'monitor for updates' — "
+                "metrics. Avoid generic placeholders like 'monitor for updates'; "
                 "instead say 'Monitor NVDAs Q2 FY2026 earnings call for data-center "
                 "revenue guidance'."
+            ),
+            "human_report_language_rule": (
+                "Write the human-facing report body in Chinese. Preserve English "
+                "company, model, product, paper, ticker, and API names. Do not "
+                "include internal IDs such as cluster_ids, evidence_ids, watchlist_ids, "
+                "write_policy, trace_timeline, or source-diversity gate text in "
+                "human Markdown; keep those only in JSON/evidence_map."
             ),
         }
 

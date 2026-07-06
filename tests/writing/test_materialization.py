@@ -14,9 +14,13 @@ from app.agents.schemas import AgentRunResult
 from app.domain import (
     AgentRole,
     CandidateCategory,
+    EvidenceItem,
+    EvidenceStrength,
     ReportStatus,
     ReviewDecision,
     RunPhase,
+    SourceAccessLevel,
+    SourceType,
     TraceEventType,
 )
 from app.harness import HarnessContext
@@ -32,6 +36,7 @@ from app.repositories import (
 from app.services import TraceService
 from app.writing import WritingOutputMaterializer
 from tests.domain.fixtures import (
+    BASE_TIME,
     confirmed_event_bundle,
     early_signal_bundle,
     run_state_fixture,
@@ -117,11 +122,11 @@ def test_writer_materializer_repairs_tech_finance_tickers_from_cluster(db_sessio
     )
 
     report = DailyReportRepository(db_session).require(result.report_ids[0])
-    item = report.sections[0].items[0]
+    item = _first_item(report, "tech_finance")
     assert item.category == CandidateCategory.TECH_FINANCE
     assert item.tickers == ["NVDA", "TSM"]
     assert item.potential_impact
-    assert "Impact chain:" in item.potential_impact
+    assert "影响链条" in item.potential_impact
 
 
 def test_writer_materializer_repairs_tech_finance_impact_from_cluster_claim(db_session) -> None:
@@ -153,11 +158,73 @@ def test_writer_materializer_repairs_tech_finance_impact_from_cluster_claim(db_s
     )
 
     report = DailyReportRepository(db_session).require(result.report_ids[0])
-    item = report.sections[0].items[0]
+    item = _first_item(report, "tech_finance")
     assert item.category == CandidateCategory.TECH_FINANCE
     assert item.tickers == []
     assert item.potential_impact
-    assert item.potential_impact.startswith("Tech-finance impact requires follow-up")
+    assert item.potential_impact.startswith("科技金融影响仍需后续验证")
+
+
+def test_writer_materializer_flags_sec_metadata_only_finance_items(db_session) -> None:
+    run = _persist_run_and_bundle(db_session)
+    finance = tech_finance_bundle()
+    sec_evidence = EvidenceItem(
+        id="ev_nvda_8k_metadata",
+        run_id=run.id,
+        source_type=SourceType.SEC_FILING,
+        source_name="SEC EDGAR",
+        access_level=SourceAccessLevel.PUBLIC,
+        strength=EvidenceStrength.OFFICIAL,
+        url="https://www.sec.gov/Archives/edgar/data/1045810/000104581026000123/nvda-20260705.htm",
+        title="NVDA 8-K filed 2026-07-05",
+        published_at=BASE_TIME,
+        retrieved_at=BASE_TIME,
+        snippet="SEC EDGAR filing 8-K for NVIDIA; primary document: nvda-20260705.htm.",
+        raw_hash="sha256:nvda-8k-metadata",
+        metadata={
+            "kind": "sec_filing",
+            "form": "8-K",
+            "filing_date": "2026-07-05",
+            "accession_number": "0001045810-26-000123",
+        },
+        created_at=BASE_TIME,
+    )
+    cluster = finance["cluster"].model_copy(
+        update={"evidence_ids": [sec_evidence.id], "tickers": ["NVDA"]}
+    )
+    EvidenceRepository(db_session).add(sec_evidence)
+    CandidateRepository(db_session).add(finance["candidate"].model_copy(update={"evidence_ids": [sec_evidence.id]}))
+    EventClusterRepository(db_session).add(cluster)
+    EvaluationRepository(db_session).add(finance["evaluation"])
+    output = WriterOutput(
+        summary="Writer drafted finance report from SEC metadata.",
+        report_drafts=[
+            _report_draft(
+                status_label="SEC filing metadata",
+                category="tech_finance",
+                potential_impact="Potentially relevant to NVDA.",
+                key_data=[],
+                followup_points=[],
+                evidence_ids=[sec_evidence.id],
+                cluster_ids=[cluster.id],
+            )
+        ],
+    )
+
+    result = WritingOutputMaterializer(HarnessContext(db_session)).materialize(
+        run=run,
+        phase=RunPhase.WRITING,
+        agent_role=AgentRole.WRITER,
+        result=_agent_result(run.id, RunPhase.WRITING, AgentRole.WRITER, output),
+    )
+
+    report = DailyReportRepository(db_session).require(result.report_ids[0])
+    item = _first_item(report, "tech_finance")
+    assert any("已抓取 SEC 文件元数据" in value for value in item.key_data)
+    assert any("sec_filing_content" in point for point in item.followup_points)
+    assert "影响链条" in item.potential_impact
+    assert "尚不能据此判断收入 beat/miss" in item.potential_impact
+    assert "股价上涨" not in item.potential_impact
 
 
 def test_writer_materializer_narrows_mixed_category_item_lineage(db_session) -> None:
@@ -221,14 +288,71 @@ def test_writer_materializer_hedges_uncertain_item_language(db_session) -> None:
 
     report = DailyReportRepository(db_session).require(result.report_ids[0])
     item = report.sections[0].items[0]
-    assert item.status_label.startswith("Preliminary / unconfirmed")
+    assert item.status_label.startswith("未确认来源信号")
     assert not item.core_information.startswith("Preliminary signal")
     assert item.key_data == [
-        "Preprint claim (unvalidated): Evasion rate >=65% across several models"
+        "信号细节（未确认）：Evasion rate >=65% across several models"
     ]
     assert item.potential_impact
-    assert item.potential_impact.startswith("Low to Medium (preprint, unvalidated)")
-    assert any("peer review status" in point for point in item.followup_points)
+    assert item.potential_impact.startswith("低到中等（单一来源，尚未确认）")
+    assert any("交叉验证" in point for point in item.followup_points)
+
+
+def test_writer_materializer_collapses_duplicate_uncertainty_prefixes(db_session) -> None:
+    run = _persist_run_and_bundle(db_session)
+    output = WriterOutput(
+        summary="Writer drafted repeated uncertainty prefixes.",
+        report_drafts=[
+            _report_draft(
+                status_label="未确认来源信号",
+                potential_impact=(
+                    "预印本阶段影响：预印本阶段影响："
+                    "若后续被交叉验证，潜在影响：若后续被交叉验证，潜在影响："
+                    "可能影响 agent 安全部署。"
+                ),
+            )
+        ],
+    )
+
+    result = WritingOutputMaterializer(HarnessContext(db_session)).materialize(
+        run=run,
+        phase=RunPhase.WRITING,
+        agent_role=AgentRole.WRITER,
+        result=_agent_result(run.id, RunPhase.WRITING, AgentRole.WRITER, output),
+    )
+
+    report = DailyReportRepository(db_session).require(result.report_ids[0])
+    item = report.sections[0].items[0]
+
+    assert item.potential_impact
+    assert item.potential_impact.count("预印本阶段影响") == 1
+    assert item.potential_impact.count("若后续被交叉验证，潜在影响") == 1
+
+
+def test_writer_materializer_localizes_status_labels_and_removes_invalid_tickers(db_session) -> None:
+    run = _persist_run_and_bundle(db_session)
+    output = WriterOutput(
+        summary="Writer drafted enum-like status and private-company ticker.",
+        report_drafts=[
+            _report_draft(
+                status_label="预印本 / 未确认: early_signal",
+                tickers=["ANTH", "GOOGL"],
+            )
+        ],
+    )
+
+    result = WritingOutputMaterializer(HarnessContext(db_session)).materialize(
+        run=run,
+        phase=RunPhase.WRITING,
+        agent_role=AgentRole.WRITER,
+        result=_agent_result(run.id, RunPhase.WRITING, AgentRole.WRITER, output),
+    )
+
+    report = DailyReportRepository(db_session).require(result.report_ids[0])
+    item = report.sections[0].items[0]
+
+    assert item.status_label == "预印本 / 未确认"
+    assert item.tickers == ["GOOGL"]
 
 
 def test_writer_materializer_repairs_missing_followups_and_emoji(db_session) -> None:
@@ -380,6 +504,52 @@ def test_writer_materializer_normalizes_section_order_and_markdown(db_session) -
     assert report.full_json["sections"][0]["section_id"] == "early_signals"
 
 
+def test_writer_materializer_renders_human_markdown_sources_and_clean_stats(db_session) -> None:
+    run = _persist_run_and_bundle(db_session)
+    draft = _report_draft(
+        status_label="Unconfirmed gray rollout feedback",
+        core_information="Candidate cl_openai_reasoning_api cites ev_openai_hn_reasoning.",
+    ).model_copy(
+        update={
+            "overview_judgments": [
+                "Source diversity: 1 distinct source type; no single-source justification needed.",
+                "WARNING: Only SEC filings source type available. Justification: official source.",
+                "A possible API-surface signal remains worth tracking.",
+            ]
+        }
+    )
+    output = WriterOutput(
+        summary="Writer drafted report with system-ish overview.",
+        report_drafts=[draft],
+    )
+
+    result = WritingOutputMaterializer(HarnessContext(db_session)).materialize(
+        run=run,
+        phase=RunPhase.WRITING,
+        agent_role=AgentRole.WRITER,
+        result=_agent_result(run.id, RunPhase.WRITING, AgentRole.WRITER, output),
+    )
+
+    report = DailyReportRepository(db_session).require(result.report_ids[0])
+
+    assert "Source diversity" not in report.full_markdown
+    assert "WARNING:" not in report.full_markdown
+    assert "Justification:" not in report.full_markdown
+    assert "cl_openai_reasoning_api" not in report.full_markdown
+    assert "ev_openai_hn_reasoning" not in report.full_markdown
+    assert "- 来源：[Discussion about new OpenAI API behavior](" in report.full_markdown
+    assert "今日信息结构统计：正文 1 条，Watchlist 0 条。" in report.full_markdown
+    assert report.full_json["statistics"]["body_item_count"] == 1
+    assert report.full_json["statistics"]["watchlist_item_count"] == 0
+    assert [section.section_id for section in report.sections] == [
+        "early_signals",
+        "confirmed_events",
+        "tech_finance",
+    ]
+    assert "## 2. 重大事件确认 Confirmed Events\n- 今日没有达到写入门槛的官方确认事件。" in report.full_markdown
+    assert "## 3. 科技圈金融信息 Tech-Finance\n- 今日没有达到写入门槛的科技金融信息" in report.full_markdown
+
+
 def test_writer_materializer_renders_watchlist_once(db_session) -> None:
     run = _persist_run_and_bundle(db_session)
     output = WriterOutput(
@@ -410,7 +580,12 @@ def test_writer_materializer_renders_watchlist_once(db_session) -> None:
     )
 
     report = DailyReportRepository(db_session).require(result.report_ids[0])
-    assert [section.section_id for section in report.sections] == ["watchlist"]
+    assert [section.section_id for section in report.sections] == [
+        "early_signals",
+        "confirmed_events",
+        "tech_finance",
+        "watchlist",
+    ]
     assert report.full_markdown.count("持续追踪 Watchlist") == 1
     assert report.full_markdown.count("OpenAI suspected reasoning-control API test") == 1
     assert "A related signal remains open." not in report.full_markdown
@@ -437,10 +612,16 @@ def test_writer_materializer_allows_watchlist_item_cluster_lineage(db_session) -
     )
 
     report = DailyReportRepository(db_session).require(result.report_ids[0])
-    item = report.sections[0].items[0]
+    watchlist_section = next(
+        section for section in report.sections if section.section_id == "watchlist"
+    )
+    item = watchlist_section.items[0]
     assert item.category == CandidateCategory.WATCHLIST_UPDATE
     assert item.cluster_ids == ["cl_openai_reasoning_api"]
-    assert report.evidence_map[0].cluster_ids == ["cl_openai_reasoning_api"]
+    assert any(
+        entry.cluster_ids == ["cl_openai_reasoning_api"]
+        for entry in report.evidence_map
+    )
 
 
 def test_writer_materializer_allows_watchlist_item_run_evidence_outside_cited_cluster(
@@ -472,7 +653,10 @@ def test_writer_materializer_allows_watchlist_item_run_evidence_outside_cited_cl
     )
 
     report = DailyReportRepository(db_session).require(result.report_ids[0])
-    item = report.sections[0].items[0]
+    watchlist_section = next(
+        section for section in report.sections if section.section_id == "watchlist"
+    )
+    item = watchlist_section.items[0]
     assert item.category == CandidateCategory.WATCHLIST_UPDATE
     assert item.evidence_ids == [official["evidence"][0].id]
 
@@ -513,11 +697,11 @@ def test_writer_materializer_normalizes_watchlist_update_shape(db_session) -> No
     update = report.watchlist_updates[0]
     assert update.watchlist_id == "watch_openai_reasoning"
     assert update.topic == "OpenAI reasoning-control API watch"
-    assert update.current_status == "active"
+    assert update.current_status == "短期追踪中"
     assert update.new_developments == [
-        "Community and code signals still need official confirmation."
+        "今日进展待核验：Community and code signals still need official confirmation."
     ]
-    assert update.next_watch == ["Check OpenAI changelog."]
+    assert update.next_watch == ["继续核验：Check OpenAI changelog."]
 
     timeline = TraceService(db_session).reconstruct_timeline(run.id)
     assert any(
@@ -574,6 +758,62 @@ def test_reviewer_materializer_blocks_early_signal_fact_language(db_session) -> 
     assert review.decision == ReviewDecision.REVISE
     assert review.issues[0].title == "Early signal is written with confirmed-fact language"
     assert updated_report.status == ReportStatus.NEEDS_REVISION
+
+
+def test_reviewer_materializer_blocks_non_chinese_human_body(db_session) -> None:
+    run = _persist_run_and_bundle(db_session)
+    context = HarnessContext(db_session)
+    materializer = WritingOutputMaterializer(context)
+    materializer.materialize(
+        run=run,
+        phase=RunPhase.WRITING,
+        agent_role=AgentRole.WRITER,
+        result=_agent_result(
+            run.id,
+            RunPhase.WRITING,
+            AgentRole.WRITER,
+            WriterOutput(
+                summary="Writer drafted English report.",
+                report_drafts=[
+                    _report_draft(
+                        status_label="Unconfirmed gray rollout feedback",
+                        core_information="Community discussion suggests a possible new API option.",
+                        why_it_matters="It may affect cost, latency, and reasoning-depth tuning.",
+                        potential_impact="If confirmed, agent frameworks may expose finer controls.",
+                        followup_points=["Check official docs and first-party SDK commits."],
+                    )
+                ],
+            ),
+        ),
+    )
+    report = DailyReportRepository(db_session).list_by_run(run.id)[0]
+
+    result = materializer.materialize(
+        run=run,
+        phase=RunPhase.REVIEWING,
+        agent_role=AgentRole.REVIEWER,
+        result=_agent_result(
+            run.id,
+            RunPhase.REVIEWING,
+            AgentRole.REVIEWER,
+            ReviewerOutput(
+                summary="Reviewer passed report.",
+                decision=ReviewDecision.PASS,
+                review_drafts=[
+                    ReviewDraft(
+                        report_id=report.id,
+                        decision=ReviewDecision.PASS,
+                        reasoning_summary="Looks good.",
+                    )
+                ],
+            ),
+        ),
+    )
+
+    review = ReviewResultRepository(db_session).require(result.review_result_ids[0])
+
+    assert review.decision == ReviewDecision.REVISE
+    assert review.issues[0].title == "Human report body is not written in Chinese"
 
 
 def test_reviewer_materializer_filters_non_blocking_watchlist_overlap(db_session) -> None:
@@ -928,26 +1168,27 @@ def _report_draft(
     report_id: str | None = None,
     category: str = "early_signal",
     core_information: str = (
-        "Community discussion and third-party code suggest a possible "
-        "new reasoning-control option."
+        "社区讨论和第三方代码显示，OpenAI 可能正在测试新的 reasoning-control API 选项。"
     ),
+    why_it_matters: str = "这会影响开发者如何在成本、延迟和推理深度之间做权衡。",
     evidence_ids: list[str] | None = None,
     cluster_ids: list[str] | None = None,
     potential_impact: str | None = (
-        "If confirmed, agent frameworks may expose finer reasoning controls."
+        "如果后续被确认，agent 框架可能会暴露更细的 reasoning 控制能力。"
     ),
     key_data: list[str] | None = None,
+    tickers: list[str] | None = None,
     followup_points: list[str] | None = None,
     tomorrow_focus: list[str] | None = None,
     watchlist_updates: list[dict] | None = None,
 ) -> ReportDraft:
     return ReportDraft(
         report_id=report_id,
-        overview_judgments=["Early API-surface signal is specific but unconfirmed."],
+        overview_judgments=["API surface 线索具体，但仍未确认。"],
         tomorrow_focus=(
             tomorrow_focus
             if tomorrow_focus is not None
-            else ["Check official changelog and SDK commits."]
+            else ["检查官方 changelog 和第一方 SDK commit。"]
         ),
         watchlist_updates=watchlist_updates or [],
         sections=[
@@ -960,25 +1201,29 @@ def _report_draft(
                         category=category,
                         status_label=status_label,
                         core_information=core_information,
-                        why_it_matters=(
-                            "It may affect how developers tune cost, latency, and reasoning depth."
-                        ),
+                        why_it_matters=why_it_matters,
                         potential_impact=potential_impact,
                         key_data=key_data or [],
+                        tickers=tickers or [],
                         evidence_ids=evidence_ids
                         or ["ev_openai_hn_reasoning", "ev_openai_wrapper_commit"],
                         cluster_ids=cluster_ids or ["cl_openai_reasoning_api"],
                         followup_points=(
                             followup_points
                             if followup_points is not None
-                            else ["Check official docs and first-party SDK commits."]
+                            else ["检查官方文档和第一方 SDK commit 是否出现同名参数。"]
                         ),
-                        uncertainty_label="low confidence, high trackability",
+                        uncertainty_label="低置信度，但可追踪性高",
                     )
                 ],
             )
         ],
     )
+
+
+def _first_item(report, section_id: str):
+    section = next(section for section in report.sections if section.section_id == section_id)
+    return section.items[0]
 
 
 def _agent_result(run_id, phase, agent_role, output) -> AgentRunResult:

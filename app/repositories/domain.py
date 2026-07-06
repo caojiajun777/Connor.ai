@@ -88,6 +88,7 @@ class CandidateRepository(DomainRepository[CandidateItem, CandidateItemRecord]):
 class EventClusterRepository(DomainRepository[EventCluster, EventClusterRecord]):
     domain_model = EventCluster
     record_model = EventClusterRecord
+    warn_on_payload_merge = False
 
     def to_record(self, obj: EventCluster) -> EventClusterRecord:
         return EventClusterRecord(
@@ -131,6 +132,7 @@ class EvaluationRepository(DomainRepository[EvaluationResult, EvaluationResultRe
 class WatchlistRepository(DomainRepository[WatchlistItem, WatchlistItemRecord]):
     domain_model = WatchlistItem
     record_model = WatchlistItemRecord
+    warn_on_payload_merge = False
 
     def to_record(self, obj: WatchlistItem) -> WatchlistItemRecord:
         return WatchlistItemRecord(
@@ -194,6 +196,7 @@ class IntelligenceThreadRepository(
 ):
     domain_model = IntelligenceThread
     record_model = IntelligenceThreadRecord
+    warn_on_payload_merge = False
 
     def to_record(self, obj: IntelligenceThread) -> IntelligenceThreadRecord:
         return IntelligenceThreadRecord(
@@ -225,6 +228,7 @@ class IntelligenceThreadRepository(
 class DailyReportRepository(DomainRepository[DailyReport, DailyReportRecord]):
     domain_model = DailyReport
     record_model = DailyReportRecord
+    warn_on_payload_merge = False
 
     def to_record(self, obj: DailyReport) -> DailyReportRecord:
         return DailyReportRecord(

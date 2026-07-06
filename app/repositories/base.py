@@ -33,6 +33,7 @@ class DomainRepository(Generic[DomainT, RecordT]):
 
     domain_model: type[DomainT]
     record_model: type[RecordT]
+    warn_on_payload_merge: bool = True
 
     def __init__(self, session: Session):
         self.session = session
@@ -43,9 +44,9 @@ class DomainRepository(Generic[DomainT, RecordT]):
         if existing is not None:
             existing_payload = getattr(existing, "payload", None)
             new_payload = getattr(record, "payload", None)
-            if existing_payload != new_payload:
+            if self.warn_on_payload_merge and existing_payload != new_payload:
                 _logger.warning(
-                    "Merging %s id=%s — existing payload differs from new payload. "
+                    "Merging %s id=%s - existing payload differs from new payload. "
                     "This may indicate an accidental id collision or a legitimate upsert.",
                     self.record_model.__name__,
                     obj.id,

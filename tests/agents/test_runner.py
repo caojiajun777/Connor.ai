@@ -571,6 +571,61 @@ def test_agent_runner_uses_writer_fallback_after_failed_repair(db_session) -> No
     assert result.completion_trace_event.metadata["deterministic_structured_fallback"] is True
 
 
+def test_agent_runner_uses_editor_fallback_after_timeout(db_session) -> None:
+    RunRepository(db_session).add(run_state_fixture())
+    model = SlowAgentScopeModel()
+    runner = create_runner(db_session, model)
+    runner.role_registry.require(AgentRole.EDITOR).execution.timeout_seconds = 0.001
+
+    result = runner.run(
+        AgentRunRequest(
+            run_id=RUN_ID,
+            phase=RunPhase.EDITING,
+            agent_role=AgentRole.EDITOR,
+            task="Revise report.",
+            context={
+                "editor_context": {
+                    "report": {
+                        "id": "report_timeout_editor",
+                        "title": "Connor.ai Daily Intelligence",
+                        "sections": [
+                            {
+                                "section_id": "early_signals",
+                                "title": "前沿爆料 Early Signals",
+                                "items": [
+                                    {
+                                        "title": "OpenAI reasoning API signal",
+                                        "category": "early_signal",
+                                        "status_label": "未确认来源信号",
+                                        "core_information": "社区信号显示 API 行为可能变化。",
+                                        "why_it_matters": "这会影响 agent runtime 控制。",
+                                        "evidence_ids": ["ev_openai_hn_reasoning"],
+                                        "cluster_ids": ["cl_openai_reasoning_api"],
+                                        "followup_points": ["检查官方文档。"],
+                                        "uncertainty_label": "未确认",
+                                    }
+                                ],
+                            }
+                        ],
+                        "watchlist_updates": [],
+                        "full_json": {
+                            "overview_judgments": ["API 线索仍需确认。"],
+                            "tomorrow_focus": ["检查官方文档。"],
+                        },
+                    }
+                }
+            },
+        )
+    )
+
+    output = result.structured_output
+    draft = output.revised_report_drafts[0]
+    assert output.metadata["deterministic_fallback"] is True
+    assert draft.report_id == "report_timeout_editor"
+    assert draft.metadata["fallback_reason"] == "editor_timeout_or_repair_failure"
+    assert result.completion_trace_event.metadata["timeout_fallback"] is True
+
+
 def test_agent_runner_repairs_writer_item_evidence_from_context(db_session) -> None:
     RunRepository(db_session).add(run_state_fixture())
     model = ScriptedAgentScopeModel(
