@@ -69,6 +69,7 @@ class DailyRunHarness:
             created_at=utc_now(),
         )
         self.context.runs.add(run)
+        self.context.session.flush()
         self.context.trace_service.record_event(
             run_id=run.id,
             phase=RunPhase.INITIALIZE,

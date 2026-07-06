@@ -53,3 +53,45 @@ Status: In progress
 
 - Re-run a full non-smoke suite after the next technical-debt batch.
 - Decide whether Phase 16 should first clean low-priority source-tool edge cases or move directly into scheduler/Docker work.
+
+## Part 2: Formal Run Startup FK Fix and Report Quality Review
+
+### Used
+
+- Strict live full-cycle smoke test.
+- Temporary SQLite database `test_tmp/quality_review_run.db`.
+- Persisted final report, clusters, evidence, evaluations, and reviews.
+
+### Did
+
+- Ran a formal daily cycle after committing the Phase 15A/15B checkpoint.
+- Found that the run failed before collection when SQLite foreign keys were enabled.
+- Fixed the run creation order so `RunRecord` is flushed before the first trace payload artifact is written.
+- Re-ran the formal daily cycle successfully.
+- Inspected the generated report as a product artifact and listed business-quality issues for the next tuning pass.
+
+### How
+
+- Added an explicit `session.flush()` immediately after `self.context.runs.add(run)` in `DailyRunHarness.create_run()`.
+- Re-ran harness/service/repository tests to confirm the normal fixture path remained stable.
+- Re-ran `tests/smoke/test_full_daily_cycle.py` with `CONNOR_DATABASE_URL=sqlite:///./test_tmp/quality_review_run.db`.
+- Queried `daily_reports`, `event_clusters`, `evidence_items`, `evaluation_results`, and `review_results` directly from SQLite.
+
+### Problems and Solutions
+
+- Problem: `TraceService.record_event()` stores trace input/output payloads as artifacts before creating the trace event. With artifact `run_id` foreign keys enabled, the first RUN_STARTED trace artifact failed if the parent run had not been flushed.
+  - Solution: Flush the run before recording RUN_STARTED.
+- Problem: Enabling foreign keys globally in the shared unit-test fixture exposed many fixture-order assumptions unrelated to the formal run bug.
+  - Solution: Keep the generic fixture focused on unit isolation and use the formal smoke path to validate production SQLite foreign-key behavior.
+
+### Checks
+
+- `python -m pytest tests\harness tests\services tests\repositories -q`: 46 passed.
+- `python -m ruff check app\harness\runner.py tests\conftest.py`: passed.
+- `python -m pytest tests\smoke\test_full_daily_cycle.py -v -s`: 1 passed in 267.39 seconds.
+
+### Report Quality Findings
+
+- The report finalized and had the required structure, but the business quality is still uneven.
+- Strongest current output: deterministic structure, clear uncertainty labels, evidence lineage, and concrete watchlist entries.
+- Main weaknesses: weak early-signal selection, generic product/preprint uncertainty language, Tech-Finance still stopping at SEC filing metadata, mixed official-update clustering, internal IDs leaking into human markdown, and no inline source links.
