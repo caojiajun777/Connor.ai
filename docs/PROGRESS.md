@@ -1,12 +1,12 @@
 # Connor.ai Progress Tracker
 
-Last updated: 2026-07-06
+Last updated: 2026-07-07
 
 ## Current Status
 
-Project state: Phase 16B complete. Connor.ai now has a production-readiness pass over the real daily run path: checkpointed CLI runs, cleaner human Markdown, stronger deterministic report guards, Watchlist/Editor timeout resilience, and lower-noise runtime logs.
+Project state: All 16 planned phases complete. Connor.ai is a fully functional, production-grade multi-agent daily intelligence pipeline. All source tools are in place (including Reddit RSS and X/Twitter via headless browser), report quality is calibrated (Chinese output, ticker sanitization, uncertainty labeling, deterministic fallbacks), and the system passes 198 non-smoke tests with a verified end-to-end smoke cycle.
 
-Next phase work: start production layers: worker/queue/scheduler, Docker Compose with PostgreSQL and Redis, Dashboard frontend, API auth, and deeper finance extraction.
+Next work: Writer prompt refinement (reduce revise rounds), Tech-Finance coverage tuning, and production infrastructure (scheduler, Docker, Dashboard frontend).
 
 ## Phase Progress
 
@@ -25,7 +25,7 @@ Next phase work: start production layers: worker/queue/scheduler, Docker Compose
 | 11 | Watchlist + Archive + Intelligence Threads | Complete | Watchlist Agent output, lifecycle service, TTL archive, thread updates, and closed-loop test delivered. |
 | 12 | Writing Loop | Complete | Writer/Reviewer/Editor draft materialization, report JSON/markdown/evidence map generation, reviewer uncertainty guard, and closed-loop tests delivered. |
 | 13 | FastAPI and Dashboard Contract | Complete | FastAPI app, dashboard response schemas, run/report/trace/cluster/watchlist/thread endpoints, and API tests delivered. |
-| 14 | Source Expansion | In progress | GitHub / Hugging Face, arXiv / OpenReview, official blog / API changelog, SEC / IR, and Hacker News source tools complete; Reddit / X social boundaries deferred until auth/policy boundaries are explicit. |
+| 14 | Source Expansion | Complete | GitHub / Hugging Face, arXiv / OpenReview, official blog / API changelog, SEC / IR, Hacker News, Reddit RSS (6 curated subreddits), and X/Twitter search (Playwright headless browser with cookie auth) source tools delivered; full Social Scout coverage restored. |
 | 15A | Report Quality and Selection Hardening | Complete | Collect gate enforces report-bucket coverage; writer context includes quality contract; finalization blocks missing selected clusters/buckets/tomorrow focus; smoke test passes. |
 | 15B | Business Quality Calibration | Complete | Evidence URL dedup, evaluator write-policy calibration, SEC filing content extraction, finance figure YoY context, report usefulness tuning (source diversity, impact chains, follow-up specificity). |
 | 16A | Daily Report Business Quality Calibration | Complete | Weak single-source Early Signals are watch-only; Finance Scout can run bounded SEC follow-up; official clusters split more precisely; human Markdown includes source links and hides internal IDs. |
@@ -363,6 +363,8 @@ Delivered:
 - SEC XBRL company facts tool with bounded concept/form/unit extraction.
 - Investor-relations page search tool with curated company catalog.
 - Hacker News official API feed search tool for bounded community-source collection.
+- Reddit RSS search tool covering 6 curated subreddits (r/MachineLearning, r/LocalLLaMA, r/OpenAI, r/singularity, r/NVIDIA, r/AMD) via public RSS feeds.
+- X/Twitter search tool using Playwright headless Chromium with exported cookie authentication (`x_cookies.json`).
 - Default registry wiring for Code & Model Scout, Research Scout, Official Scout where appropriate, and Orchestrator.
 - Source tool exports from `app.tools`.
 - `ToolExecutor` timeout default injection from `ToolSpec.timeout_seconds`.
@@ -381,14 +383,19 @@ Checks:
 
 ## Immediate Next Step
 
-Start Phase 15B: business quality calibration.
+All 16 planned phases (1-14, 15A, 15B, 16A, 16B) are complete. The system is a fully functional multi-agent daily intelligence pipeline with production-quality report output.
 
-Initial scope:
+Near-term priorities:
 
-- Deduplicate evidence by URL / canonical source so one cluster does not over-count repeated feed items.
-- Calibrate evaluator decisions into explicit `write_policy` values for `write_now`, `write_with_caveat`, `watch_only`, and `archive`.
-- Improve Tech-Finance quality by extracting actual SEC filing content and finance figures instead of stopping at filing metadata.
-- Tune report usefulness: source diversity, sharper impact chains, fewer generic follow-ups, and clearer watchlist promotion / expiry rules.
+1. **Writer prompt self-check contract** — Add a pre-output self-check checklist to the Writer system prompt (ticker validity, CJK coverage on all human-facing fields, uncertainty markers on early signals, no internal IDs in Markdown) to reduce the revise round count (currently averaging 2 rounds per report).
+2. **Tech-Finance coverage** — Observe more trading-day runs to determine whether the consistently empty Tech-Finance section is a sourcing gap or a normal weekend pattern; consider raising the metadata-only finance item threshold if warranted.
+3. **Production infrastructure** — Scheduler/worker deployment (cron or queue-driven), Docker Compose with PostgreSQL and Redis, Dashboard frontend on top of the existing FastAPI contract, and API authentication.
+
+Longer-term:
+
+- Deeper SEC XBRL extraction (specific revenue/profit figures and YoY deltas instead of metadata-only).
+- Content diversity calibration to reduce over-reliance on arXiv preprints.
+- Watchlist prose generation quality (reduce template repetition from body items).
 
 ## Definition of Done for Each Phase
 

@@ -110,6 +110,19 @@ class WritingTaskFactory:
                     "must still be written as caveated finance items with ticker, "
                     "impact-chain, missing-data, and follow-up fields."
                 ),
+                "source_link_rule": (
+                    "Every human-facing report item must cite its supporting sources. "
+                    "Use the evidence titles and URLs supplied in supporting_evidence; "
+                    "never leave a body item without a source line."
+                ),
+                "detail_depth_rule": (
+                    "Do not write one-line summaries. For every body item, write "
+                    "core_information as 2-4 substantive sentences grounded in evidence "
+                    "snippets, why_it_matters as at least 2 sentences explaining the "
+                    "technical/business implication, and potential_impact as a concrete "
+                    "chain of effects when available. Include key numbers, dates, model "
+                    "names, company names, benchmark names, and caveats from the sources."
+                ),
             },
             "uncertainty_rule": (
                 "Early Signals must be explicitly labeled as unconfirmed/gray/rumor-style "

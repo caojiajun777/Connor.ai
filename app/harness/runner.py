@@ -14,7 +14,7 @@ from app.domain import RunBudgets, RunPhase, RunState, RunStatus, SourceType, Tr
 from app.domain.base import utc_now
 from app.harness.collect import CollectLoopHarness
 from app.harness.config import HarnessConfig
-from app.harness.context import HarnessContext
+from app.harness.context import HarnessContext, ModelFactory
 from app.harness.decisions import AgentTask, DailyRunResult
 from app.harness.exceptions import HarnessError
 from app.harness.gates import QualityGateService
@@ -33,6 +33,7 @@ class DailyRunHarness:
         config: HarnessConfig | None = None,
         trace_service: TraceService | None = None,
         artifact_service: ArtifactService | None = None,
+        model_factory: ModelFactory | None = None,
     ):
         self.context = HarnessContext(
             session=session,
@@ -40,6 +41,7 @@ class DailyRunHarness:
             config=config,
             trace_service=trace_service,
             artifact_service=artifact_service,
+            model_factory=model_factory,
         )
         self.gate_service = QualityGateService(self.context.config)
         self.collect_loop = CollectLoopHarness(self.context, gate_service=self.gate_service)
@@ -124,7 +126,12 @@ class DailyRunHarness:
                     tasks_by_phase=collect_tasks_by_phase,
                 )
 
-            if active_run.phase == RunPhase.WRITING and active_run.status == RunStatus.RUNNING:
+            if active_run.phase in {
+                RunPhase.WRITING,
+                RunPhase.REVIEWING,
+                RunPhase.EDITING,
+                RunPhase.FINAL_REVIEW,
+            } and active_run.status == RunStatus.RUNNING:
                 active_run, writing_decisions = self.writing_loop.run(
                     active_run,
                     tasks_by_phase=writing_tasks_by_phase,

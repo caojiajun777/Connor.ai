@@ -62,6 +62,8 @@ def test_writer_context_includes_report_quality_contract() -> None:
         "Benchmark table missing."
     ]
     assert context["report_quality_contract"]["selected_cluster_rule"]
+    assert context["report_quality_contract"]["source_link_rule"]
+    assert "2-4 substantive sentences" in context["report_quality_contract"]["detail_depth_rule"]
 
 
 def test_writer_context_maps_market_followup_to_finance_bucket() -> None:

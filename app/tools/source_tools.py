@@ -2671,6 +2671,31 @@ def sec_filing_content_tool(
 # X / Twitter search via browser automation (Phase 14 completion)
 # ---------------------------------------------------------------------------
 
+# Module-level browser cache — Chromium launch is expensive (~5-15s), so we
+# keep a single browser instance alive across calls within the same process.
+_browser = None
+_browser_lock = None
+_browser_cleanup_registered = False
+
+
+def _get_browser():
+    """Return a cached headless Chromium, launching it on first call."""
+    global _browser, _browser_lock, _browser_cleanup_registered
+    if _browser_lock is None:
+        import threading
+        _browser_lock = threading.Lock()
+    if _browser is None:
+        with _browser_lock:
+            if _browser is None:
+                from playwright.sync_api import sync_playwright as _sp
+                _pw = _sp()
+                _browser = _pw.start().chromium.launch(headless=True)
+                if not _browser_cleanup_registered:
+                    import atexit
+                    atexit.register(_browser.close)
+                    _browser_cleanup_registered = True
+    return _browser
+
 
 def x_search_tool(
     context: ToolExecutionContext,
@@ -2735,9 +2760,8 @@ def x_search_tool(
         * 1000
     )
 
-    try:
-        from playwright.sync_api import sync_playwright as _sync_playwright  # type: ignore[import-untyped]
-    except ImportError:
+    import importlib.util as _util
+    if _util.find_spec("playwright") is None:
         return ToolEnvelope(
             tool_name="x_search",
             source_type=SourceType.X,
@@ -2758,64 +2782,59 @@ def x_search_tool(
     items: list[ToolEnvelopeItem] = []
     errors: list[ToolError] = []
     try:
-        with _sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            browser_ctx = browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
-                ),
-                viewport={"width": 1920, "height": 1080},
+        browser = _get_browser()
+        browser_ctx = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1920, "height": 1080},
+        )
+        browser_ctx.add_cookies(cookies)
+        page = browser_ctx.new_page()
+        page.goto(search_url, wait_until="domcontentloaded", timeout=timeout_ms)
+        page.wait_for_timeout(3000)
+        articles = page.query_selector_all("article")
+        count = 0
+        for article in articles:
+            if count >= max_results:
+                break
+            try:
+                text = article.inner_text()
+            except Exception:
+                continue
+            if not text.strip():
+                continue
+            lines = [line.strip() for line in text.split("\n") if line.strip()]
+            author = lines[0] if lines else "X user"
+            body_start = 1
+            for i, line in enumerate(lines[1:], start=1):
+                if line.startswith("@") or line.endswith("·") or line.endswith("m") or line.endswith("h") or line.endswith("d"):
+                    continue
+                if line in ("·", "Replying to", ""):
+                    continue
+                body_start = i
+                break
+            tweet_body = " ".join(lines[body_start:])[:200] if body_start < len(lines) else text[:200]
+            snippet = tweet_body if tweet_body else text[:500]
+            item = ToolEnvelopeItem(
+                title=tweet_body,
+                url=search_url,
+                author=author,
+                published_at=retrieved_at,
+                snippet=snippet,
+                raw_hash=_stable_hash({"text": snippet, "author": author}),
+                metadata={
+                    "kind": "x_post",
+                    "query": search_query,
+                    "result_index": count,
+                    "author": author,
+                    "full_text": text[:1000],
+                },
             )
-            browser_ctx.add_cookies(cookies)
-            page = browser_ctx.new_page()
-            page.goto(search_url, wait_until="domcontentloaded", timeout=timeout_ms)
-            page.wait_for_timeout(3000)
-            articles = page.query_selector_all("article")
-            count = 0
-            for article in articles:
-                if count >= max_results:
-                    break
-                try:
-                    text = article.inner_text()
-                except Exception:
-                    continue
-                if not text.strip():
-                    continue
-                lines = [line.strip() for line in text.split("\n") if line.strip()]
-                # X article structure: line 0 = display name + handle + timestamp,
-                # then reply-to indicator, then the actual tweet text follows
-                author = lines[0] if lines else "X user"
-                # Skip past metadata lines (handle, timestamp, reply indicator)
-                body_start = 1
-                for i, line in enumerate(lines[1:], start=1):
-                    if line.startswith("@") or line.endswith("·") or line.endswith("m") or line.endswith("h") or line.endswith("d"):
-                        continue
-                    if line in ("·", "Replying to", ""):
-                        continue
-                    body_start = i
-                    break
-                tweet_body = " ".join(lines[body_start:])[:200] if body_start < len(lines) else text[:200]
-                snippet = tweet_body if tweet_body else text[:500]
-                item = ToolEnvelopeItem(
-                    title=tweet_body,
-                    url=search_url,
-                    author=author,
-                    published_at=retrieved_at,
-                    snippet=snippet,
-                    raw_hash=_stable_hash({"text": snippet, "author": author}),
-                    metadata={
-                        "kind": "x_post",
-                        "query": search_query,
-                        "result_index": count,
-                        "author": author,
-                        "full_text": text[:1000],
-                    },
-                )
-                items.append(item)
-                count += 1
-            browser_ctx.close()
-            browser.close()
+            items.append(item)
+            count += 1
+        browser_ctx.close()
     except Exception as exc:
         errors.append(
             ToolError(
@@ -2824,6 +2843,21 @@ def x_search_tool(
                 retryable=True,
             )
         )
+
+    cookie_health_warning: dict | None = None
+    if not items and not errors:
+        from app.tools.cookie_health import check_x_cookie_health as _cookie_health
+
+        health = _cookie_health(str(cookies_path))
+        if health["status"] in ("EXPIRED", "MISSING", "INVALID"):
+            cookie_health_warning = health
+            errors.append(
+                ToolError(
+                    code="x_cookie_expired_or_missing",
+                    message=health["message"],
+                    retryable=False,
+                )
+            )
 
     return ToolEnvelope(
         tool_name="x_search",
@@ -2836,6 +2870,7 @@ def x_search_tool(
             "search_url": search_url,
             "cookies_source": str(cookies_path),
             "result_count": len(items),
+            **({"cookie_health_warning": cookie_health_warning} if cookie_health_warning else {}),
         },
     )
 

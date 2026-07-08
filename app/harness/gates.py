@@ -107,7 +107,52 @@ class QualityGateService:
             **coverage_metadata["bucket_counts"],
         }
 
+        # Score-based quality checks
+        selected_scores = [
+            evaluation.total_score
+            for evaluation in full_state.evaluations
+            if evaluation.cluster_id in selected_cluster_ids
+        ]
+        avg_score = sum(selected_scores) / len(selected_scores) if selected_scores else 0.0
+        min_score = min(selected_scores) if selected_scores else 0.0
+        metrics["avg_selected_score"] = round(avg_score, 2)
+        metrics["min_selected_score"] = round(min_score, 2)
+
         if len(selected_cluster_ids) >= self._min_report_body_items():
+            if min_score < self.config.min_single_cluster_score:
+                risk_msg = (
+                    "Low-quality cluster (score "
+                    + str(round(min_score, 1))
+                    + ") below single-cluster threshold "
+                    + str(self.config.min_single_cluster_score)
+                )
+                if run.loop_counters.collect_rounds < run.budgets.max_collect_rounds:
+                    return CollectGateDecision(
+                        outcome=CollectGateOutcome.CONTINUE_COLLECTING,
+                        reasoning_summary=risk_msg + "; budget remains, continue collecting.",
+                        selected_cluster_ids=selected_cluster_ids,
+                        followup_queries=followup_queries,
+                        metrics=metrics,
+                        risk_flags=["low_quality_cluster"],
+                        metadata=coverage_metadata,
+                    )
+            if avg_score < self.config.min_avg_evaluation_score:
+                risk_msg = (
+                    "Average score ("
+                    + str(round(avg_score, 1))
+                    + ") below threshold "
+                    + str(self.config.min_avg_evaluation_score)
+                )
+                if run.loop_counters.collect_rounds < run.budgets.max_collect_rounds:
+                    return CollectGateDecision(
+                        outcome=CollectGateOutcome.CONTINUE_COLLECTING,
+                        reasoning_summary=risk_msg + "; budget remains, continue collecting.",
+                        selected_cluster_ids=selected_cluster_ids,
+                        followup_queries=followup_queries,
+                        metrics=metrics,
+                        risk_flags=["low_avg_score"],
+                        metadata=coverage_metadata,
+                    )
             return CollectGateDecision(
                 outcome=CollectGateOutcome.ENTER_WRITING,
                 reasoning_summary=(
@@ -336,7 +381,15 @@ class QualityGateService:
                 continue
             if any(cluster.id in selected_set for cluster in available):
                 continue
+            # Require minimum score for coerced bucket coverage
             cluster = available[0]
+            cluster_evals = [
+                e for e in full_state.evaluations
+                if e.cluster_id == cluster.id and self._evaluation_is_writeable(e)
+            ]
+            best_score = max((e.total_score for e in cluster_evals), default=0)
+            if best_score < self.config.bucket_coverage_min_score:
+                continue
             selected.append(cluster.id)
             selected_set.add(cluster.id)
             added.append(cluster.id)

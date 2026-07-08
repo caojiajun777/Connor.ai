@@ -145,9 +145,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     print("=" * 50)
 
     from app.db.base import Base
-    from app.db.session import engine
+    from app.db.session import get_engine
 
-    Base.metadata.create_all(engine)
+    Base.metadata.create_all(get_engine())
 
     print("Bootstrapping pipeline ...")
     session = SessionLocal()
@@ -174,6 +174,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 min_report_body_items=2,
                 commit_checkpoints=True,
             ),
+            model_factory=model_factory,
         )
         print("  Tool registry, role registry, and model factory are ready.")
 
@@ -251,6 +252,15 @@ def cmd_run(args: argparse.Namespace) -> int:
     else:
         print("\n  No final report was produced. The run may have paused or failed.")
 
+    if getattr(args, "cleanup", False):
+        from app.repositories.cleanup import cleanup_expired_data
+
+        print()
+        cleanup_result = cleanup_expired_data(session)
+        for key, value in sorted(cleanup_result.items()):
+            if value:
+                print(f"  cleanup: {key} = {value}")
+
     session.close()
     return 0 if final_run.status == RunStatus.COMPLETED else 1
 
@@ -318,6 +328,32 @@ def cmd_status(_args: argparse.Namespace) -> int:
             print(f"  Report ID  : {latest.report_id}")
         if latest.error_summary:
             print(f"  Error      : {latest.error_summary}")
+
+        # X cookie health
+        from app.tools.cookie_health import check_x_cookie_health  # noqa: E402
+
+        cookie = check_x_cookie_health()
+        print(f"  X Cookie   : {cookie['status']} — {cookie['message']}")
+
+        return 0
+    finally:
+        session.close()
+
+
+def cmd_cleanup(args: argparse.Namespace) -> int:
+    """Clean up expired data from the database."""
+    from app.repositories.cleanup import cleanup_expired_data
+
+    session = SessionLocal()
+    try:
+        dry_run = getattr(args, "dry_run", False)
+        result = cleanup_expired_data(session, dry_run=dry_run)
+        if dry_run:
+            print("Dry run — would delete/archive:")
+        for key, value in sorted(result.items()):
+            print(f"  {key}: {value}")
+        if not dry_run:
+            print("Cleanup complete.")
         return 0
     finally:
         session.close()
@@ -349,8 +385,22 @@ def main() -> int:
         default=None,
         help="Directory to save the final report (markdown + JSON).",
     )
+    run_parser.add_argument(
+        "--cleanup",
+        action="store_true",
+        default=False,
+        help="Run data retention cleanup after the intelligence cycle.",
+    )
 
     sub.add_parser("status", help="Show the latest run status")
+
+    cleanup_parser = sub.add_parser("cleanup", help="Clean up expired data")
+    cleanup_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="Preview what would be deleted without actually deleting.",
+    )
 
     args = parser.parse_args()
 
@@ -358,6 +408,8 @@ def main() -> int:
         return cmd_run(args)
     if args.command == "status":
         return cmd_status(args)
+    if args.command == "cleanup":
+        return cmd_cleanup(args)
 
     parser.print_help()
     return 0

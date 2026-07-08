@@ -186,6 +186,16 @@ class CollectLoopHarness:
         if phase == RunPhase.WATCHLIST_UPDATE and self.context.config.expire_due_watchlist_items:
             self.watchlist_lifecycle.expire_due_items(run=run, phase=phase)
 
+        if (
+            phase == RunPhase.SCOUTING
+            and len(tasks) > 1
+            and self.context.config.parallelize_scouts
+        ):
+            self._execute_scout_tasks_parallel(
+                run, phase, tasks, tasks_by_phase=tasks_by_phase
+            )
+            return
+
         tool_call_count = 0
         successful_task_count = 0
         for task_index, task in enumerate(tasks, start=1):
@@ -313,6 +323,195 @@ class CollectLoopHarness:
             run_id=run.id,
             phase=phase,
             summary=f"{phase.value} phase completed.",
+        )
+
+    def _execute_scout_tasks_parallel(
+        self,
+        run: RunState,
+        _phase: RunPhase,
+        tasks: list[AgentTask],
+        *,
+        tasks_by_phase: Mapping[RunPhase, list[AgentTask]],
+    ) -> None:
+        """Run scout tasks in parallel using thread-pool isolation.
+
+        Each scout gets its own database session (thread-safe on PostgreSQL).
+        Results are materialised sequentially on the main session after all
+        scouts complete.  SQLite is detected and falls back to serial execution.
+        """
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        if self.context.agent_runner is None:
+            raise HarnessError("Scout parallelisation requires an AgentRunner")
+
+        materialize = self.context.config.materialize_scout_candidates
+        bootstrap = self._should_bootstrap_single_agent(tasks_by_phase)
+
+        # SQLite does not support concurrent writes across threads,
+        # even with WAL mode.  Only PostgreSQL can benefit from
+        # multi-threaded scout parallelism.  Fall back to serial
+        # execution for SQLite (both in-memory and file-based).
+        engine_url = str(self.context.session.get_bind().url)
+        if "sqlite" in engine_url:
+            logger.info("SQLite detected; falling back to serial scout execution.")
+            # Re-run via the normal serial path (copy of the loop body below).
+            tool_call_count = 0
+            successful_task_count = 0
+            for task_index, task in enumerate(tasks, start=1):
+                if task.phase != _phase:
+                    raise HarnessError(
+                        f"task phase {task.phase.value} does not match {_phase.value}"
+                    )
+                try:
+                    result = self.context.agent_runner.run(
+                        AgentRunRequest(
+                            run_id=run.id,
+                            phase=_phase,
+                            agent_role=task.agent_role,
+                            task=task.task,
+                            context=self._build_task_context(run, _phase, task.context),
+                        )
+                    )
+                except AgentScopeExecutionError as exc:
+                    if not self.context.config.continue_on_scout_agent_error:
+                        raise
+                    self.context.trace_service.record_event(
+                        run_id=run.id,
+                        phase=_phase,
+                        agent_role=task.agent_role,
+                        event_type=TraceEventType.AGENT_DECISION,
+                        status=TraceStatus.FAILED,
+                        summary="Scout task failed; continuing collect.",
+                        error=str(exc) or type(exc).__name__,
+                        metadata={"harness": True, "skipped_task": True},
+                    )
+                    self.context.checkpoint()
+                    continue
+                tool_call_count += len(result.tool_results)
+                successful_task_count += 1
+                if materialize:
+                    self.materializer.materialize(
+                        run=run,
+                        phase=_phase,
+                        agent_role=task.agent_role,
+                        result=result,
+                        bootstrap_cluster_and_evaluation=bootstrap,
+                    )
+            latest_run = self.context.runs.require(run.id)
+            counters = latest_run.loop_counters.model_copy(
+                update={
+                    "tool_calls": latest_run.loop_counters.tool_calls + tool_call_count,
+                    "model_calls": latest_run.loop_counters.model_calls + successful_task_count,
+                }
+            )
+            self.context.runs.add(
+                latest_run.model_copy(update={"loop_counters": counters})
+            )
+            self.context.complete_phase(
+                run_id=run.id,
+                phase=_phase,
+                summary=f"{_phase.value} phase completed (serial fallback).",
+            )
+            return
+
+        # Commit the main session so that the RunState and any
+        # previously-persisted data are visible to per-scout thread sessions.
+        self.context.session.commit()
+
+        # Capture shared read-only dependencies before entering threads.
+        tool_registry = self.context.agent_runner.tool_registry
+        role_registry = self.context.agent_runner.role_registry
+        model_factory = self.context.agent_runner.model_factory
+
+        # Each scout thread builds its own session + runner from the shared engine.
+        from app.db.session import SessionLocal
+
+        def _run_one(task: AgentTask) -> tuple[AgentTask, object | None, str | None]:
+            """Returns (task, AgentRunResult | None, error_message | None)."""
+            session = SessionLocal()
+            try:
+                from app.agents import AgentRunner as _AgentRunner
+                from app.services import TraceService as _TraceService
+
+                trace_svc = _TraceService(session)
+                runner = _AgentRunner(
+                    session,
+                    role_registry=role_registry,
+                    tool_registry=tool_registry,
+                    model_factory=model_factory,
+                    trace_service=trace_svc,
+                )
+                result = runner.run(
+                    AgentRunRequest(
+                        run_id=run.id,
+                        phase=_phase,
+                        agent_role=task.agent_role,
+                        task=task.task,
+                        context=self._build_task_context(run, _phase, task.context),
+                    )
+                )
+                session.commit()
+                return (task, result, None)
+            except AgentScopeExecutionError as exc:
+                session.rollback()
+                if not self.context.config.continue_on_scout_agent_error:
+                    raise
+                return (task, None, str(exc) or type(exc).__name__)
+            finally:
+                session.close()
+
+        results: list[tuple[AgentTask, object | None, str | None]] = []
+        with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
+            futures = {executor.submit(_run_one, task): task for task in tasks}
+            for future in as_completed(futures):
+                results.append(future.result())
+
+        # Materialise sequentially on the main session.
+        tool_call_total = 0
+        successful = 0
+        for task, result, error in results:
+            if error is not None:
+                self.context.trace_service.record_event(
+                    run_id=run.id,
+                    phase=_phase,
+                    agent_role=task.agent_role,
+                    event_type=TraceEventType.AGENT_DECISION,
+                    status=TraceStatus.FAILED,
+                    summary="Scout task failed (parallel); continuing collect.",
+                    error=error,
+                    metadata={"harness": True, "parallel": True, "skipped_task": True},
+                )
+                self.context.checkpoint()
+                continue
+
+            successful += 1
+            tool_call_total += len(result.tool_results)  # type: ignore[union-attr]
+            if materialize:
+                self.materializer.materialize(
+                    run=run,
+                    phase=_phase,
+                    agent_role=task.agent_role,
+                    result=result,
+                    bootstrap_cluster_and_evaluation=bootstrap,
+                )
+
+        # Update run counters.
+        latest_run = self.context.runs.require(run.id)
+        counters = latest_run.loop_counters.model_copy(
+            update={
+                "tool_calls": latest_run.loop_counters.tool_calls + tool_call_total,
+                "model_calls": latest_run.loop_counters.model_calls + successful,
+            }
+        )
+        self.context.runs.add(latest_run.model_copy(update={"loop_counters": counters}))
+        self.context.complete_phase(
+            run_id=run.id,
+            phase=_phase,
+            summary=(
+                f"{_phase.value} phase completed (parallel, "
+                f"{successful}/{len(tasks)} scouts succeeded)."
+            ),
         )
 
     def _can_continue_after_agent_error(self, phase: RunPhase) -> bool:

@@ -49,6 +49,7 @@ from app.domain.report import (
     ReportSection,
     WatchlistUpdate,
 )
+from app.domain.report_evaluation import ReportEvaluation
 from app.domain.review import ReviewIssue, ReviewResult
 from app.domain.run import RunBudgets, RunLoopCounters, RunState
 from app.domain.thread import IntelligenceThread, ThreadTimelineEntry
@@ -89,6 +90,7 @@ __all__ = [
     "ObjectRef",
     "ObjectType",
     "PriorityLevel",
+    "ReportEvaluation",
     "ReportItem",
     "ReportSection",
     "ReportStatus",

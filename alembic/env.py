@@ -41,6 +41,8 @@ def run_migrations_online() -> None:
 
     configuration = config.get_section(config.config_ini_section, {})
     configuration["sqlalchemy.url"] = get_url()
+    # Allow migration revision IDs up to 64 characters.
+    configuration["version_num_col_length"] = 64
     connectable = engine_from_config(
         configuration,
         prefix="sqlalchemy.",

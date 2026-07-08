@@ -16,6 +16,12 @@ class HarnessConfig(ConnorBaseModel):
     min_selected_items: int = Field(default=2, gt=0)
     min_report_body_items: int | None = Field(default=None, gt=0)
     require_report_bucket_coverage: bool = True
+
+    # Score-based quality thresholds (Phase 17)
+    min_avg_evaluation_score: float = Field(default=5.0, ge=0, le=10)
+    min_single_cluster_score: float = Field(default=3.0, ge=0, le=10)
+    bucket_coverage_min_score: float = Field(default=4.0, ge=0, le=10)
+
     manual_review_on_failure: bool = True
     archive_gate_snapshots: bool = True
     archive_loop_snapshots: bool = True
@@ -31,3 +37,10 @@ class HarnessConfig(ConnorBaseModel):
     continue_on_scout_agent_error: bool = True
     continue_on_watchlist_agent_error: bool = True
     commit_checkpoints: bool = False
+
+    # Scout parallelization
+    parallelize_scouts: bool = True
+
+    # LLM-as-Judge report quality evaluation
+    enable_report_judge: bool = True
+    report_judge_min_score: float = Field(default=6.0, ge=0, le=10)

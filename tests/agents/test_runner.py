@@ -922,7 +922,7 @@ def test_agent_runner_rejects_invalid_structured_output_and_records_error(db_ses
     )
     runner = create_runner(db_session, model)
 
-    with pytest.raises(ValidationError):
+    with pytest.raises(AgentScopeExecutionError) as exc_info:
         runner.run(
             AgentRunRequest(
                 run_id=RUN_ID,
@@ -931,6 +931,7 @@ def test_agent_runner_rejects_invalid_structured_output_and_records_error(db_ses
                 task="Return invalid scout output.",
             )
         )
+    assert isinstance(exc_info.value.__cause__, ValidationError)
 
     timeline = TraceService(db_session).reconstruct_timeline(RUN_ID)
     assert timeline.events[-1].event_type == TraceEventType.ERROR

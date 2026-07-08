@@ -66,7 +66,7 @@ class AgentRunner:
             asyncio.get_running_loop()
         except RuntimeError:
             # NOTE: asyncio.run() must be called from the main thread when using
-            # SQLite (check_same_thread). For production PostgreSQL deployments,
+            # For production deployments with PostgreSQL,
             # this is not a constraint. If this method is ever invoked from a
             # worker thread on Python 3.14+ Windows, replace with a
             # threading.Thread + new_event_loop() pattern and ensure the DB
@@ -232,7 +232,7 @@ class AgentRunner:
                 f"{config.display_name} AgentScope task timed out after "
                 f"{config.execution.timeout_seconds} second(s)."
             )
-            self.trace_service.record_event(
+            error_event = self.trace_service.record_event(
                 run_id=request.run_id,
                 phase=request.phase,
                 agent_role=request.agent_role,
@@ -295,6 +295,7 @@ class AgentRunner:
                     tool_results=bridge.executed_results_snapshot(),
                     start_trace_event=start_event,
                     completion_trace_event=completion_event,
+                    error_trace_event=error_event,
                 )
             self.session.flush()
             raise AgentScopeExecutionError(timeout_message) from exc
@@ -314,8 +315,8 @@ class AgentRunner:
                 },
             )
             self.session.flush()
-            if isinstance(exc, ValidationError):
-                raise
+            if isinstance(exc, (ValidationError, json.JSONDecodeError)):
+                raise AgentScopeExecutionError(error_message) from exc
             if isinstance(exc, AgentScopeExecutionError):
                 raise
             raise AgentScopeExecutionError(error_message) from exc

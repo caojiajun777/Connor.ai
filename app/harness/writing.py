@@ -452,7 +452,8 @@ class WritingLoopHarness:
     def _finalize_report(self, report_id: str) -> DailyReport:
         report = self.reports.require(report_id)
         timeline_ids = report.trace_timeline_ids or [
-            event.id for event in self.context.trace_service.reconstruct_timeline(report.run_id).events
+            event.id
+            for event in self.context.trace_service.reconstruct_timeline(report.run_id).events
         ]
         finalized = report.model_copy(
             update={
@@ -462,6 +463,39 @@ class WritingLoopHarness:
             }
         )
         self.reports.add(finalized)
+
+        # ---- LLM-as-Judge quality evaluation ----
+        if (
+            self.context.config.enable_report_judge
+            and self.context.model_factory is not None
+        ):
+            try:
+                from app.evaluators.report_judge import ReportJudge
+
+                full_state = self.context.runs.get_full_state(report.run_id)
+                judge = ReportJudge(
+                    self.context.session,
+                    trace_service=self.context.trace_service,
+                )
+                evaluation = judge.evaluate(
+                    report=finalized,
+                    full_state=full_state,
+                    model_factory=self.context.model_factory,
+                )
+                if evaluation is not None:
+                    finalized = finalized.model_copy(
+                        update={
+                            "metadata": {
+                                **finalized.metadata,
+                                "judge_evaluation_id": evaluation.id,
+                                "judge_total_score": evaluation.total_score,
+                            },
+                        }
+                    )
+                    self.reports.add(finalized)
+            except Exception:
+                pass
+
         return finalized
 
     @staticmethod

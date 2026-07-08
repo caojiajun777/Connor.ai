@@ -325,8 +325,31 @@ def test_writer_materializer_collapses_duplicate_uncertainty_prefixes(db_session
     item = report.sections[0].items[0]
 
     assert item.potential_impact
-    assert item.potential_impact.count("预印本阶段影响") == 1
-    assert item.potential_impact.count("若后续被交叉验证，潜在影响") == 1
+    assert "预印本阶段影响" not in item.potential_impact
+    assert "若后续被交叉验证，潜在影响" not in item.potential_impact
+    assert item.potential_impact.startswith("如果后续被交叉验证，")
+
+
+def test_writer_materializer_preserves_existing_if_confirmed_hedge(db_session) -> None:
+    run = _persist_run_and_bundle(db_session)
+    output = WriterOutput(
+        summary="Writer drafted already-hedged impact text.",
+        report_drafts=[_report_draft(status_label="未确认来源信号")],
+    )
+
+    result = WritingOutputMaterializer(HarnessContext(db_session)).materialize(
+        run=run,
+        phase=RunPhase.WRITING,
+        agent_role=AgentRole.WRITER,
+        result=_agent_result(run.id, RunPhase.WRITING, AgentRole.WRITER, output),
+    )
+
+    report = DailyReportRepository(db_session).require(result.report_ids[0])
+    item = report.sections[0].items[0]
+
+    assert item.potential_impact
+    assert item.potential_impact.startswith("如果后续被确认，")
+    assert "如果后续被交叉验证，如果后续被确认" not in item.potential_impact
 
 
 def test_writer_materializer_localizes_status_labels_and_removes_invalid_tickers(db_session) -> None:
@@ -336,7 +359,7 @@ def test_writer_materializer_localizes_status_labels_and_removes_invalid_tickers
         report_drafts=[
             _report_draft(
                 status_label="预印本 / 未确认: early_signal",
-                tickers=["ANTH", "GOOGL"],
+                tickers=[" $ANTH ", "nasdaq:googl", "GOOGL", "openai"],
             )
         ],
     )
@@ -538,6 +561,7 @@ def test_writer_materializer_renders_human_markdown_sources_and_clean_stats(db_s
     assert "cl_openai_reasoning_api" not in report.full_markdown
     assert "ev_openai_hn_reasoning" not in report.full_markdown
     assert "- 来源：[Discussion about new OpenAI API behavior](" in report.full_markdown
+    assert "[Add mapping for reasoning-control option](" in report.full_markdown
     assert "今日信息结构统计：正文 1 条，Watchlist 0 条。" in report.full_markdown
     assert report.full_json["statistics"]["body_item_count"] == 1
     assert report.full_json["statistics"]["watchlist_item_count"] == 0
@@ -547,7 +571,65 @@ def test_writer_materializer_renders_human_markdown_sources_and_clean_stats(db_s
         "tech_finance",
     ]
     assert "## 2. 重大事件确认 Confirmed Events\n- 今日没有达到写入门槛的官方确认事件。" in report.full_markdown
-    assert "## 3. 科技圈金融信息 Tech-Finance\n- 今日没有达到写入门槛的科技金融信息" in report.full_markdown
+    assert "## 3. 科技圈金融信息 Tech-Finance\n- 本轮没有留下 Finance Scout 工具调用" in report.full_markdown
+
+
+def test_writer_materializer_expands_sparse_items_from_evidence(db_session) -> None:
+    run = _persist_run_and_bundle(db_session)
+    output = WriterOutput(
+        summary="Writer drafted thin report item.",
+        report_drafts=[
+            _report_draft(
+                status_label="Unconfirmed gray rollout feedback",
+                core_information="短讯。",
+                why_it_matters="值得看。",
+            )
+        ],
+    )
+
+    result = WritingOutputMaterializer(HarnessContext(db_session)).materialize(
+        run=run,
+        phase=RunPhase.WRITING,
+        agent_role=AgentRole.WRITER,
+        result=_agent_result(run.id, RunPhase.WRITING, AgentRole.WRITER, output),
+    )
+
+    report = DailyReportRepository(db_session).require(result.report_ids[0])
+    item = report.sections[0].items[0]
+    assert "来源补充" in item.core_information
+    assert "reasoning-control API option" in item.core_information
+    assert "至少由" in item.why_it_matters
+
+
+def test_writer_materializer_explains_empty_tech_finance_with_available_cluster(
+    db_session,
+) -> None:
+    run = _persist_run_and_bundle(db_session)
+    finance = tech_finance_bundle()
+    finance_cluster = finance["cluster"].model_copy(update={"selected": False})
+    EvidenceRepository(db_session).add_many(finance["evidence"])
+    CandidateRepository(db_session).add(finance["candidate"])
+    EventClusterRepository(db_session).add(finance_cluster)
+    EvaluationRepository(db_session).add(finance["evaluation"])
+
+    output = WriterOutput(
+        summary="Writer drafted report without finance item.",
+        report_drafts=[
+            _report_draft(status_label="Unconfirmed gray rollout feedback")
+        ],
+    )
+
+    result = WritingOutputMaterializer(HarnessContext(db_session)).materialize(
+        run=run,
+        phase=RunPhase.WRITING,
+        agent_role=AgentRole.WRITER,
+        result=_agent_result(run.id, RunPhase.WRITING, AgentRole.WRITER, output),
+    )
+
+    report = DailyReportRepository(db_session).require(result.report_ids[0])
+    assert "Finance Scout 形成了 1 个 Tech-Finance 事件簇" in report.full_markdown
+    assert "[NVIDIA investor update on data center demand](" in report.full_markdown
+    assert report.full_json["empty_section_notes"]["tech_finance"]
 
 
 def test_writer_materializer_renders_watchlist_once(db_session) -> None:
@@ -980,6 +1062,64 @@ def test_reviewer_materializer_falls_back_from_missing_report_id(db_session) -> 
     review = ReviewResultRepository(db_session).require(result.review_result_ids[0])
     assert review.report_id == report.id
     assert review.decision == ReviewDecision.PASS
+
+
+def test_reviewer_materializer_blocks_items_without_source_urls(db_session) -> None:
+    run = run_state_fixture().model_copy(update={"phase": RunPhase.WRITING})
+    RunRepository(db_session).add(run)
+    bundle = early_signal_bundle()
+    evidence = [
+        item.model_copy(update={"url": None, "raw_ref": f"fixture:{item.id}"})
+        for item in bundle["evidence"]
+    ]
+    EvidenceRepository(db_session).add_many(evidence)
+    CandidateRepository(db_session).add(bundle["candidate"])
+    EventClusterRepository(db_session).add(bundle["cluster"])
+    EvaluationRepository(db_session).add(bundle["evaluation"])
+    context = HarnessContext(db_session)
+    materializer = WritingOutputMaterializer(context)
+    materializer.materialize(
+        run=run,
+        phase=RunPhase.WRITING,
+        agent_role=AgentRole.WRITER,
+        result=_agent_result(
+            run.id,
+            RunPhase.WRITING,
+            AgentRole.WRITER,
+            WriterOutput(
+                summary="Writer drafted report without URL-backed evidence.",
+                report_drafts=[_report_draft(status_label="Unconfirmed gray rollout feedback")],
+            ),
+        ),
+    )
+    report = DailyReportRepository(db_session).list_by_run(run.id)[0]
+    assert "缺少可展示来源链接" in report.full_markdown
+
+    result = materializer.materialize(
+        run=run,
+        phase=RunPhase.REVIEWING,
+        agent_role=AgentRole.REVIEWER,
+        result=_agent_result(
+            run.id,
+            RunPhase.REVIEWING,
+            AgentRole.REVIEWER,
+            ReviewerOutput(
+                summary="Reviewer passed report.",
+                decision=ReviewDecision.PASS,
+                review_drafts=[
+                    ReviewDraft(
+                        report_id=report.id,
+                        decision=ReviewDecision.PASS,
+                        reasoning_summary="Looks good.",
+                    )
+                ],
+            ),
+        ),
+    )
+
+    review = ReviewResultRepository(db_session).require(result.review_result_ids[0])
+    assert review.decision == ReviewDecision.REVISE
+    assert any(issue.title == "Report item is missing source links" for issue in review.issues)
 
 
 def test_reviewer_guard_checks_core_language_independently(db_session) -> None:

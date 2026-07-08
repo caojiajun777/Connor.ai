@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Callable
 
 from sqlalchemy.orm import Session
 
 from app.agents import AgentRunner
+from app.agents.config import AgentRoleConfig as _AgentRoleConfig
 from app.domain import ArtifactKind, RunPhase, RunState, RunStatus, TraceEventType, TraceStatus
 from app.domain.base import utc_now
 from app.harness.config import HarnessConfig
 from app.repositories import RunRepository
 from app.services import ArtifactService, TraceService
+
+#: Model factory signature — takes a role config and returns an AgentScope ChatModel.
+ModelFactory = Callable[[_AgentRoleConfig], Any]
 
 
 @dataclass
@@ -24,6 +28,7 @@ class HarnessContext:
     config: HarnessConfig | None = None
     trace_service: TraceService | None = None
     artifact_service: ArtifactService | None = None
+    model_factory: ModelFactory | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self.config = self.config or HarnessConfig()

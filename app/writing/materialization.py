@@ -328,7 +328,9 @@ class WritingOutputMaterializer:
         sections = self._normalize_report_sections(raw_sections)
         evidence_map = self._evidence_map_for_sections(run.id, sections)
         evidence_by_id = self._evidence_by_id_for_map(run.id, evidence_map)
-        trace_timeline_ids = [event.id for event in self.context.runs.get_full_state(run.id).trace_events]
+        full_state = self.context.runs.get_full_state(run.id)
+        trace_timeline_ids = [event.id for event in full_state.trace_events]
+        empty_section_notes = self._empty_section_notes(full_state, sections)
         metadata = {
             **(existing.metadata if existing is not None else {}),
             **draft.metadata,
@@ -348,6 +350,7 @@ class WritingOutputMaterializer:
             trace_timeline_ids=trace_timeline_ids,
             overview_judgments=draft.overview_judgments,
             tomorrow_focus=tomorrow_focus,
+            empty_section_notes=empty_section_notes,
         )
         full_markdown = self._render_markdown(
             run=run,
@@ -357,6 +360,7 @@ class WritingOutputMaterializer:
             overview_judgments=draft.overview_judgments,
             tomorrow_focus=tomorrow_focus,
             evidence_by_id=evidence_by_id,
+            empty_section_notes=empty_section_notes,
         )
         now = utc_now()
         return DailyReport(
@@ -478,6 +482,7 @@ class WritingOutputMaterializer:
         draft = self._sanitize_report_item_tickers(draft)
         draft = self._repair_missing_followups(draft)
         draft = self._repair_generic_followups(draft)
+        draft = self._expand_sparse_item_text_from_evidence(run_id, draft)
         draft = self._normalize_report_item_text(draft)
         item_id = draft.item_id or deterministic_id(
             "item",
@@ -736,11 +741,15 @@ class WritingOutputMaterializer:
             "OPENAI",
             "XAI",
         }
-        tickers = [
-            ticker
-            for ticker in draft.tickers
-            if ticker.upper() not in invalid_tickers
-        ]
+        tickers: list[str] = []
+        removed: list[str] = []
+        for raw_ticker in draft.tickers:
+            ticker = WritingOutputMaterializer._normalize_public_ticker(raw_ticker)
+            if ticker is None or ticker in invalid_tickers:
+                removed.append(raw_ticker)
+                continue
+            if ticker not in tickers:
+                tickers.append(ticker)
         if tickers == draft.tickers:
             return draft
         return draft.model_copy(
@@ -748,14 +757,24 @@ class WritingOutputMaterializer:
                 "tickers": tickers,
                 "metadata": {
                     **draft.metadata,
-                    "removed_invalid_tickers": [
-                        ticker
-                        for ticker in draft.tickers
-                        if ticker.upper() in invalid_tickers
-                    ],
+                    "removed_invalid_tickers": removed,
                 },
             }
         )
+
+    @staticmethod
+    def _normalize_public_ticker(raw_ticker: str) -> str | None:
+        ticker = str(raw_ticker or "").strip().upper()
+        if ticker.startswith("$"):
+            ticker = ticker[1:].strip()
+        if ":" in ticker:
+            ticker = ticker.rsplit(":", 1)[-1].strip()
+        ticker = ticker.strip(" ,.;")
+        if not ticker:
+            return None
+        if not re.fullmatch(r"[A-Z][A-Z0-9.-]{0,7}", ticker):
+            return None
+        return ticker
 
     @staticmethod
     def _has_uncertainty_marker(text: str | None) -> bool:
@@ -771,6 +790,7 @@ class WritingOutputMaterializer:
                 "not peer-reviewed",
                 "peer review",
                 "if validated",
+                "if confirmed",
                 "independently validated",
                 "reported",
                 "suggest",
@@ -787,6 +807,7 @@ class WritingOutputMaterializer:
                 "尚未确认",
                 "未验证",
                 "单一来源",
+                "后续被确认",
                 "交叉验证",
                 "官方确认",
                 "同行评审",
@@ -838,6 +859,11 @@ class WritingOutputMaterializer:
         replacements = {
             "预印本阶段影响：预印本阶段影响：": "预印本阶段影响：",
             "若后续被交叉验证，潜在影响：若后续被交叉验证，潜在影响：": "若后续被交叉验证，潜在影响：",
+            "预印本阶段影响：若后续被交叉验证，潜在影响：": "如果后续被交叉验证，",
+            "预印本阶段影响：": "预印本阶段，",
+            "若后续被交叉验证，潜在影响：": "如果后续被交叉验证，",
+            "如果后续被交叉验证，如果后续被确认，": "如果后续被交叉验证，",
+            "如果后续被交叉验证，若后续被确认，": "如果后续被交叉验证，",
         }
         cleaned = text
         changed = True
@@ -938,6 +964,113 @@ class WritingOutputMaterializer:
                 }
         )
         return draft
+
+    def _expand_sparse_item_text_from_evidence(
+        self,
+        run_id: str,
+        draft: ReportItemDraft,
+    ) -> ReportItemDraft:
+        """Use cited evidence snippets to thicken overly terse report items."""
+
+        evidence_items = self._evidence_items_for_ids(run_id, draft.evidence_ids)
+        if not evidence_items:
+            return draft
+
+        updates: dict[str, object] = {}
+        metadata = dict(draft.metadata)
+        evidence_detail = self._evidence_detail_sentence(evidence_items)
+
+        if evidence_detail and self._is_sparse_report_text(draft.core_information, minimum=120):
+            updates["core_information"] = (
+                f"{draft.core_information} 来源补充：{evidence_detail}"
+            )
+            metadata["expanded_sparse_core_information"] = True
+
+        if self._is_sparse_report_text(draft.why_it_matters, minimum=90):
+            source_names = self._dedupe(
+                [
+                    evidence.source_name or evidence.source_type.value
+                    for evidence in evidence_items
+                    if evidence.source_name or evidence.source_type
+                ]
+            )
+            source_text = "、".join(source_names[:3]) if source_names else "已引用来源"
+            updates["why_it_matters"] = (
+                f"{draft.why_it_matters} 这条判断至少由{source_text}支撑，"
+                "后续应围绕原始来源中的数字、发布时间、实体关系和复现情况继续验证。"
+            )
+            metadata["expanded_sparse_why_it_matters"] = True
+
+        if not updates:
+            return draft
+        return draft.model_copy(update={**updates, "metadata": metadata})
+
+    def _evidence_items_for_ids(
+        self,
+        run_id: str,
+        evidence_ids: list[str],
+    ) -> list[EvidenceItem]:
+        items: list[EvidenceItem] = []
+        for evidence_id in self._dedupe(evidence_ids):
+            evidence = self.evidence.get(evidence_id)
+            if evidence is not None and evidence.run_id == run_id:
+                items.append(evidence)
+        return items
+
+    @staticmethod
+    def _is_sparse_report_text(text: str | None, *, minimum: int) -> bool:
+        if not text:
+            return True
+        compact = re.sub(r"\s+", "", text)
+        return len(compact) < minimum
+
+    @staticmethod
+    def _evidence_detail_sentence(evidence_items: list[EvidenceItem]) -> str | None:
+        details: list[str] = []
+        for evidence in evidence_items[:3]:
+            title = WritingOutputMaterializer._clean_report_text(evidence.title)
+            snippet = WritingOutputMaterializer._clean_report_text(evidence.snippet)
+            if not title and not snippet:
+                continue
+            source = WritingOutputMaterializer._clean_report_text(
+                evidence.source_name or evidence.source_type.value
+            )
+            phrase = WritingOutputMaterializer._compact_evidence_phrase(
+                f"{title} {snippet}".strip()
+            )
+            if phrase:
+                details.append(f"{source} 记录了 {phrase} 相关线索")
+            elif title:
+                details.append(f"{source} 记录了相关标题线索")
+            else:
+                details.append(f"{source} 记录了相关内容线索")
+        if not details:
+            return None
+        return (
+            f"{'；'.join(details)}。这些来源提供了正文判断的依据，"
+            "后续仍需要继续核对官方文档、第一方发布或独立复现情况。"
+        )
+
+    @staticmethod
+    def _compact_evidence_phrase(text: str | None) -> str | None:
+        if not text:
+            return None
+        cleaned = WritingOutputMaterializer._clean_report_text(text)
+        if not cleaned:
+            return None
+        for phrase in (
+            "reasoning-control API option",
+            "data center demand",
+            "SEC filing",
+            "8-K",
+        ):
+            if phrase.lower() in cleaned.lower():
+                return phrase
+        latin_count = len(re.findall(r"[A-Za-z]", cleaned))
+        cjk_count = len(re.findall(r"[\u3400-\u9fff]", cleaned))
+        if latin_count > cjk_count * 2 and len(cleaned) > 28:
+            return None
+        return cleaned[:80]
 
     @staticmethod
     def _metadata_only_finance_impact(tickers: list[str]) -> str:
@@ -1700,8 +1833,39 @@ class WritingOutputMaterializer:
     def _deterministic_report_quality_issues(self, report: DailyReport) -> list[ReviewIssueDraft]:
         return [
             *self._early_signal_fact_issues(report),
+            *self._source_link_issues(report),
             *self._human_language_issues(report),
             *self._system_language_issues(report),
+        ]
+
+    def _source_link_issues(self, report: DailyReport) -> list[ReviewIssueDraft]:
+        missing_links: dict[str, list[str]] = {}
+        for section in report.sections:
+            for item in section.items:
+                has_url = False
+                for evidence_id in self._dedupe(item.evidence_ids):
+                    evidence = self.evidence.get(evidence_id)
+                    if evidence is not None and evidence.run_id == report.run_id and evidence.url:
+                        has_url = True
+                        break
+                if not has_url:
+                    missing_links[item.item_id] = item.evidence_ids
+
+        if not missing_links:
+            return []
+        return [
+            ReviewIssueDraft(
+                priority=1,
+                title="Report item is missing source links",
+                body=(
+                    "Every human-facing report item must render at least one source URL. "
+                    "Attach URL-backed evidence or remove the item from the report."
+                ),
+                metadata={
+                    "deterministic_guard": "report_item_source_links",
+                    "item_evidence_ids": missing_links,
+                },
+            )
         ]
 
     def _human_language_issues(self, report: DailyReport) -> list[ReviewIssueDraft]:
@@ -1711,14 +1875,14 @@ class WritingOutputMaterializer:
                 if item.category == CandidateCategory.WATCHLIST_UPDATE:
                     continue
                 item_missing: list[str] = []
-                if not self._contains_cjk(item.core_information):
+                if not self._is_human_facing_chinese(item.core_information):
                     item_missing.append("core_information")
-                if not self._contains_cjk(item.why_it_matters):
+                if not self._is_human_facing_chinese(item.why_it_matters):
                     item_missing.append("why_it_matters")
-                if item.potential_impact and not self._contains_cjk(item.potential_impact):
+                if item.potential_impact and not self._is_human_facing_chinese(item.potential_impact):
                     item_missing.append("potential_impact")
                 if item.followup_points and not any(
-                    self._contains_cjk(point) for point in item.followup_points
+                    self._is_human_facing_chinese(point) for point in item.followup_points
                 ):
                     item_missing.append("followup_points")
                 if item_missing:
@@ -1779,6 +1943,14 @@ class WritingOutputMaterializer:
     @staticmethod
     def _contains_cjk(text: str) -> bool:
         return bool(re.search(r"[\u3400-\u9fff]", text))
+
+    @staticmethod
+    def _is_human_facing_chinese(text: str | None) -> bool:
+        if not text:
+            return False
+        cjk_count = len(re.findall(r"[\u3400-\u9fff]", text))
+        latin_count = len(re.findall(r"[A-Za-z]", text))
+        return cjk_count >= 8 and cjk_count * 3 >= latin_count
 
     @staticmethod
     def _contains_confirmed_fact_language(text: str) -> bool:
@@ -1957,6 +2129,112 @@ class WritingOutputMaterializer:
         self.context.persist_run(updated)
 
     @staticmethod
+    def _empty_section_notes(full_state, sections: list[ReportSection]) -> dict[str, list[str]]:
+        """Explain empty required sections with enough context to diagnose the pipeline."""
+
+        notes: dict[str, list[str]] = {}
+        section_by_id = {section.section_id: section for section in sections}
+        tech_section = section_by_id.get("tech_finance")
+        if tech_section is None or tech_section.items:
+            return notes
+
+        finance_clusters = [
+            cluster
+            for cluster in full_state.clusters
+            if cluster.category == CandidateCategory.TECH_FINANCE
+        ]
+        finance_tool_calls = [
+            call
+            for call in full_state.tool_calls
+            if call.agent_role == AgentRole.FINANCE_SCOUT
+        ]
+        evidence_by_id = {evidence.id: evidence for evidence in full_state.evidence}
+
+        if not finance_clusters:
+            if finance_tool_calls:
+                tool_summary = WritingOutputMaterializer._finance_tool_call_summary(finance_tool_calls)
+                notes["tech_finance"] = [
+                    (
+                        "- 本轮 Finance Scout 已调用科技金融来源工具，"
+                        f"但没有形成可写入的 Tech-Finance 事件簇（{tool_summary}）。"
+                        "这更像是来源返回的信息没有达到候选门槛，而不是 Writer 漏写。"
+                    )
+                ]
+            else:
+                notes["tech_finance"] = [
+                    (
+                        "- 本轮没有留下 Finance Scout 工具调用或 Tech-Finance 事件簇；"
+                        "需要检查任务编排是否触发了 Finance Scout。"
+                    )
+                ]
+            return notes
+
+        selected_ids = set(full_state.run.selected_cluster_ids)
+        selected_finance = [
+            cluster
+            for cluster in finance_clusters
+            if cluster.selected or cluster.id in selected_ids
+        ]
+        if selected_finance:
+            cluster = selected_finance[0]
+            sources = WritingOutputMaterializer._source_links_from_evidence_ids(
+                cluster.evidence_ids,
+                evidence_by_id,
+                limit=3,
+            )
+            notes["tech_finance"] = [
+                (
+                    "- 存在已选中的 Tech-Finance 事件簇但正文为空，"
+                    "这是写作链路异常而不是信息不足。"
+                    f"代表线索：{cluster.title}。"
+                ),
+                f"- 来源：{'；'.join(sources)}",
+            ]
+            return notes
+
+        top_cluster = finance_clusters[0]
+        evaluations = [
+            evaluation
+            for evaluation in full_state.evaluations
+            if evaluation.cluster_id == top_cluster.id
+        ]
+        evaluation_note = WritingOutputMaterializer._finance_evaluation_note(evaluations)
+        sources = WritingOutputMaterializer._source_links_from_evidence_ids(
+            top_cluster.evidence_ids,
+            evidence_by_id,
+            limit=3,
+        )
+        notes["tech_finance"] = [
+            (
+                f"- Finance Scout 形成了 {len(finance_clusters)} 个 Tech-Finance 事件簇，"
+                "但本轮没有进入正文。"
+                f"最接近写入门槛的线索：{top_cluster.title}。{evaluation_note}"
+            ),
+            f"- 来源：{'；'.join(sources)}",
+        ]
+        return notes
+
+    @staticmethod
+    def _finance_tool_call_summary(tool_calls: list) -> str:
+        counts: dict[str, int] = {}
+        for call in tool_calls:
+            key = f"{call.tool_name}:{call.status.value}"
+            counts[key] = counts.get(key, 0) + 1
+        return "，".join(f"{key} x{count}" for key, count in sorted(counts.items()))
+
+    @staticmethod
+    def _finance_evaluation_note(evaluations: list) -> str:
+        if not evaluations:
+            return "尚未看到 Market Evaluator 对它给出可写入决策。"
+        best = sorted(evaluations, key=lambda item: item.total_score, reverse=True)[0]
+        reason = WritingOutputMaterializer._clean_report_text(best.reasoning_summary) or ""
+        reason = reason[:180]
+        return (
+            f"Market Evaluator 决策为 {best.decision.value}，"
+            f"分数 {best.total_score:g}。{reason}"
+        )
+
+    @staticmethod
     def _full_json(
         *,
         run: RunState,
@@ -1967,6 +2245,7 @@ class WritingOutputMaterializer:
         trace_timeline_ids: list[str],
         overview_judgments: list[str],
         tomorrow_focus: list[str],
+        empty_section_notes: dict[str, list[str]] | None = None,
     ) -> dict:
         return {
             "title": title,
@@ -1982,6 +2261,7 @@ class WritingOutputMaterializer:
             "watchlist_updates": [update.model_dump(mode="json") for update in watchlist_updates],
             "trace_timeline_ids": trace_timeline_ids,
             "tomorrow_focus": tomorrow_focus,
+            "empty_section_notes": empty_section_notes or {},
         }
 
     @staticmethod
@@ -2015,6 +2295,7 @@ class WritingOutputMaterializer:
         overview_judgments: list[str],
         tomorrow_focus: list[str],
         evidence_by_id: dict[str, EvidenceItem],
+        empty_section_notes: dict[str, list[str]] | None = None,
     ) -> str:
         body_item_count = sum(
             len(section.items)
@@ -2052,7 +2333,11 @@ class WritingOutputMaterializer:
             next_index += 1
             lines.extend(["", f"## {index}. {section.title}"])
             if not section.items:
-                lines.append(WritingOutputMaterializer._empty_section_message(section.section_id))
+                notes = (empty_section_notes or {}).get(section.section_id)
+                if notes:
+                    lines.extend(notes)
+                else:
+                    lines.append(WritingOutputMaterializer._empty_section_message(section.section_id))
                 continue
             for item in section.items:
                 lines.extend(
@@ -2130,8 +2415,9 @@ class WritingOutputMaterializer:
         if item.uncertainty_label:
             lines.append(f"- 不确定性：{item.uncertainty_label}")
         sources = WritingOutputMaterializer._source_links(item, evidence_by_id)
-        if sources:
-            lines.append(f"- 来源：{'；'.join(sources)}")
+        lines.append(
+            f"- 来源：{'；'.join(sources) if sources else '证据已记录，但当前渲染缺少可展示来源链接。'}"
+        )
         if item.followup_points:
             lines.append(f"- 后续追踪点：{'；'.join(item.followup_points)}")
         return lines
@@ -2186,18 +2472,44 @@ class WritingOutputMaterializer:
         item: ReportItem,
         evidence_by_id: dict[str, EvidenceItem],
     ) -> list[str]:
+        return WritingOutputMaterializer._source_links_from_evidence_ids(
+            item.evidence_ids,
+            evidence_by_id,
+        )
+
+    @staticmethod
+    def _source_links_from_evidence_ids(
+        evidence_ids: list[str],
+        evidence_by_id: dict[str, EvidenceItem],
+        *,
+        limit: int = 5,
+    ) -> list[str]:
         links: list[str] = []
-        for index, evidence_id in enumerate(item.evidence_ids[:3], start=1):
+        seen_urls: set[str] = set()
+        missing_count = 0
+        for index, evidence_id in enumerate(evidence_ids, start=1):
             evidence = evidence_by_id.get(evidence_id)
             if evidence is None:
+                missing_count += 1
                 continue
             label = WritingOutputMaterializer._markdown_link_label(
                 evidence.title or evidence.source_name or f"Source {index}"
             )
             if evidence.url:
-                links.append(f"[{label}]({evidence.url})")
+                url = str(evidence.url).strip()
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                links.append(f"[{label}]({url})")
             else:
-                links.append(label)
+                links.append(f"{label}（缺少可展示来源链接）")
+            if len(links) >= limit:
+                break
+        if not links and evidence_ids:
+            return ["证据已记录，但当前渲染缺少可展示来源链接。"]
+        hidden_count = max(0, len(WritingOutputMaterializer._dedupe(evidence_ids)) - len(links) - missing_count)
+        if hidden_count:
+            links.append(f"另有 {hidden_count} 条证据保留在结构化记录中")
         return links
 
     @staticmethod
