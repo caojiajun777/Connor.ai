@@ -12,7 +12,6 @@ import json
 import time
 from typing import Any
 
-from app.agents.outputs import AgentStructuredOutput
 from app.core.ids import IdPrefix, random_id
 from app.domain import (
     AgentRole,
@@ -250,69 +249,80 @@ class ReportJudge:
         model_factory: Any,
         timeout_seconds: int,
     ) -> dict:
-        """Call the DeepSeek judge model and parse its JSON response."""
+        """Call the DeepSeek judge model via direct HTTP (no AgentScope).
 
-        import asyncio
+        Uses the OpenAI-compatible chat completions API directly so that
+        the judge works reliably regardless of the calling thread's event
+        loop state.
+        """
 
-        from app.agents.config import AgentExecutionConfig, AgentRoleConfig
+        import urllib.request
+        import urllib.error
 
-        # Minimal role config for a no-tools judge call
-        config = AgentRoleConfig(
-            role=AgentRole.REVIEWER,
-            display_name="Report Judge",
-            system_prompt=JUDGE_SYSTEM_PROMPT,
-            allowed_tool_names=[],
-            output_model=AgentStructuredOutput,
-            execution=AgentExecutionConfig(
-                max_iters=1,
-                max_tool_calls=0,
-                timeout_seconds=timeout_seconds,
-                model_name=self._judge_model_name,
-            ),
-        )
+        from app.config import get_settings
 
-        model = model_factory(config)
+        settings = get_settings()
+        api_key = settings.deepseek_api_key
+        if not api_key:
+            raise RuntimeError("CONNOR_DEEPSEEK_API_KEY is not set")
 
-        async def _judge() -> dict:
-            from agentscope.agent import Agent
-            from agentscope.message import UserMsg
+        model_name = self._judge_model_name or settings.deepseek_model
+        url = settings.deepseek_base_url.rstrip("/") + "/v1/chat/completions"
 
-            agent = Agent(
-                name="ReportJudge",
-                system_prompt=JUDGE_SYSTEM_PROMPT,
-                model=model,
-                toolkit=None,
-            )
-            user_msg = UserMsg(
-                name="judge_harness",
-                content=json.dumps(
+        payload = json.dumps(
+            {
+                "model": model_name,
+                "messages": [
+                    {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
                     {
-                        "task": "Score the following Connor.ai daily intelligence report.",
-                        "report": report_text,
-                        "output_rule": (
-                            "Return ONLY a single JSON object. No markdown fences, "
+                        "role": "user",
+                        "content": (
+                            "Score the following Connor.ai daily intelligence report.\n\n"
+                            + report_text
+                            + "\n\nReturn ONLY a single JSON object. No markdown fences, "
                             "no extra text before or after the JSON."
                         ),
                     },
-                    ensure_ascii=False,
-                ),
-                role="user",
-            )
-            response = await agent.reply(user_msg)
-            text = response.get_text_content()
-            if text is None:
-                raise RuntimeError("Judge returned empty response")
+                ],
+                "temperature": 0.3,
+                "max_tokens": 2048,
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
 
-            return self._parse_judge_json(text)
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={
+                "Authorization": "Bearer " + api_key,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
 
         try:
-            return asyncio.run(_judge())
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            try:
-                return loop.run_until_complete(_judge())
-            finally:
-                loop.close()
+            with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(
+                "DeepSeek API HTTP " + str(exc.code) + ": " + detail[:500]
+            ) from exc
+        except Exception as exc:
+            raise RuntimeError(
+                "DeepSeek API call failed: " + str(exc)
+            ) from exc
+
+        choice = body.get("choices", [{}])[0]
+        content = choice.get("message", {}).get("content", "")
+        if not content:
+            raise RuntimeError(
+                "Judge returned empty response. finish_reason="
+                + choice.get("finish_reason", "?")
+            )
+
+        return self._parse_judge_json(content)
 
     @staticmethod
     def _parse_judge_json(text: str) -> dict:

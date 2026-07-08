@@ -89,6 +89,8 @@ class DailyReport(DomainModel):
     trace_timeline_ids: list[str] = Field(default_factory=list)
     review_result_ids: list[str] = Field(default_factory=list)
     quality_score: Score | None = None
+    overview_judgments: list[str] = Field(default_factory=list)
+    tomorrow_focus: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")

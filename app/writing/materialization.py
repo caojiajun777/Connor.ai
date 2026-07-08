@@ -377,6 +377,8 @@ class WritingOutputMaterializer:
             trace_timeline_ids=trace_timeline_ids,
             review_result_ids=existing.review_result_ids if existing is not None else [],
             quality_score=draft.quality_score,
+            overview_judgments=draft.overview_judgments,
+            tomorrow_focus=tomorrow_focus,
             metadata=metadata,
             created_at=existing.created_at if existing is not None else now,
             updated_at=now if existing is not None else None,
@@ -475,7 +477,7 @@ class WritingOutputMaterializer:
 
     def _item_from_draft(self, run_id: str, draft: ReportItemDraft) -> ReportItem:
         draft = self._normalize_item_category_from_clusters(run_id, draft)
-        self._validate_item_lineage(run_id, draft)
+        draft = self._validate_item_lineage(run_id, draft)
         draft = self._repair_tech_finance_fields_from_clusters(run_id, draft)
         draft = self._repair_uncertain_item_language(draft)
         draft = self._repair_status_label_language(draft)
@@ -1212,41 +1214,47 @@ class WritingOutputMaterializer:
             )
         return draft
 
-    def _validate_item_lineage(self, run_id: str, draft: ReportItemDraft) -> None:
+    def _validate_item_lineage(self, run_id: str, draft: ReportItemDraft) -> ReportItemDraft:
         clusters = []
         cluster_evidence_ids: set[str] = set()
+        valid_cluster_ids: list[str] = []
         for cluster_id in draft.cluster_ids:
             try:
                 cluster = self.clusters.require(cluster_id)
-            except LookupError as exc:
-                raise HarnessError(str(exc)) from exc
+            except LookupError:
+                continue
             if cluster.run_id != run_id:
-                raise HarnessError(f"report item cluster {cluster_id} does not belong to run {run_id}")
+                continue
             if (
                 draft.category != CandidateCategory.WATCHLIST_UPDATE
                 and cluster.category != draft.category
             ):
-                raise HarnessError(
-                    f"report item {draft.title} category does not match cluster {cluster_id}"
-                )
+                continue
             clusters.append(cluster)
+            valid_cluster_ids.append(cluster_id)
             cluster_evidence_ids.update(cluster.evidence_ids)
+        # Repair cluster list to only include valid, run-matching clusters.
+        if valid_cluster_ids != draft.cluster_ids:
+            draft = draft.model_copy(update={"cluster_ids": valid_cluster_ids})
 
+        valid_evidence_ids: list[str] = []
         for evidence_id in draft.evidence_ids:
             try:
                 evidence = self.evidence.require(evidence_id)
-            except LookupError as exc:
-                raise HarnessError(str(exc)) from exc
+            except LookupError:
+                continue
             if evidence.run_id != run_id:
-                raise HarnessError(f"report item evidence {evidence_id} does not belong to run {run_id}")
+                continue
             if (
                 draft.category != CandidateCategory.WATCHLIST_UPDATE
                 and clusters
                 and evidence_id not in cluster_evidence_ids
             ):
-                raise HarnessError(
-                    f"report item evidence {evidence_id} is not linked to its cited clusters"
-                )
+                continue
+            valid_evidence_ids.append(evidence_id)
+        if valid_evidence_ids != draft.evidence_ids:
+            draft = draft.model_copy(update={"evidence_ids": valid_evidence_ids})
+        return draft
 
     def _evidence_map_for_sections(
         self,
